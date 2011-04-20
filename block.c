@@ -28,6 +28,7 @@
 #include "block_int.h"
 #include "module.h"
 #include "qemu-objects.h"
+#include "livebackup.h"
 
 #ifdef CONFIG_BSD
 #include <sys/types.h>
@@ -419,6 +420,7 @@ static int bdrv_open_common(BlockDriverState *bs, const char *filename,
     int flags, BlockDriver *drv)
 {
     int ret, open_flags;
+    backup_disk *bd = NULL;
 
     assert(drv != NULL);
 
@@ -459,6 +461,8 @@ static int bdrv_open_common(BlockDriverState *bs, const char *filename,
      */
     if (bs->is_temporary) {
         open_flags |= BDRV_O_RDWR;
+    } else {
+       bd = open_dirty_bitmap(filename);
     }
 
     /* Open the image, either directly or using a protocol */
