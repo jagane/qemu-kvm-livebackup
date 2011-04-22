@@ -2393,6 +2393,10 @@ DEF("kvm-shadow-memory", HAS_ARG, QEMU_OPTION_kvm_shadow_memory,
     "-kvm-shadow-memory MEGABYTES\n"
     "                allocate MEGABYTES for kvm mmu shadowing\n",
     QEMU_ARCH_I386)
+DEF("backup_port", HAS_ARG, QEMU_OPTION_backup_port,
+    "-backup_port b\n"
+    "                TCP port that the built in backup daemon listens on\n",
+    QEMU_ARCH_ALL)
 
 HXCOMM This is the last statement. Insert new options before this line!
 STEXI

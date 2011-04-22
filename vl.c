@@ -274,6 +274,8 @@ static int default_floppy = 1;
 static int default_cdrom = 1;
 static int default_sdcard = 1;
 
+extern char *backup_port;
+
 static struct {
     const char *driver;
     int *flag;
@@ -2866,6 +2868,9 @@ int main(int argc, char **argv, char **envp)
                     fclose(fp);
                     break;
                 }
+            case QEMU_OPTION_backup_port:
+                backup_port = (char *) optarg;
+                break;
             default:
                 os_parse_cmd_args(popt->index, optarg);
             }

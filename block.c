@@ -687,6 +687,10 @@ void bdrv_close(BlockDriverState *bs)
             bdrv_close(bs->file);
         }
 
+        if (bs->backup_disk) {
+            close_dirty_bitmap(bs);
+        }
+
         /* call the change callback */
         bs->media_changed = 1;
         if (bs->change_cb)
@@ -993,6 +997,9 @@ int bdrv_write(BlockDriverState *bs, int64_t sector_num,
 
     if (bs->dirty_bitmap) {
         set_dirty_bitmap(bs, sector_num, nb_sectors, 1);
+    }
+    if (bs->backup_disk) {
+        set_dirty(bs, sector_num, nb_sectors);
     }
 
     if (bs->wr_highest_sector < sector_num + nb_sectors - 1) {
@@ -2239,8 +2246,14 @@ BlockDriverAIOCB *bdrv_aio_writev(BlockDriverState *bs, int64_t sector_num,
         opaque = blk_cb_data;
     }
 
-    ret = drv->bdrv_aio_writev(bs, sector_num, qiov, nb_sectors,
+    if (bs->backup_disk) {
+// fprintf(stderr, "[A:%d@%ld to %p(%p,%p)]\n", nb_sectors, sector_num, buf, cb, opaque);
+        ret = set_dirty_and_start_async(bs, sector_num, qiov,
+                               nb_sectors, cb, opaque);
+    } else {
+        ret = drv->bdrv_aio_writev(bs, sector_num, qiov, nb_sectors,
                                cb, opaque);
+    }
 
     if (ret) {
         /* Update stats even though technically transfer has not happened. */
