@@ -460,12 +460,15 @@ static int bdrv_open_common(BlockDriverState *bs, const char *filename,
      */
     if (bs->is_temporary) {
         open_flags |= BDRV_O_RDWR;
-    } else {
-       bs->backup_disk = open_dirty_bitmap(filename);
     }
+
+    bs->backup_disk = NULL;
 
     /* Open the image, either directly or using a protocol */
     if (drv->bdrv_file_open) {
+        if (!bs->is_temporary) {
+            bs->backup_disk = open_dirty_bitmap(filename);
+        }
         ret = drv->bdrv_file_open(bs, filename, open_flags);
     } else {
         ret = bdrv_file_open(&bs->file, filename, open_flags);

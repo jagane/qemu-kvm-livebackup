@@ -351,6 +351,9 @@ open_dirty_bitmap(const char *filename)
     int dirty_bitmap_valid = 0;
     backup_disk *retv;
 
+    pthread_mutex_lock(&backup_mutex);
+
+fprintf(stderr, "open_dirty_bitmap: Entered. file %s\n", filename);
     sprintf(conf_file, "%s.livebackupconf", filename);
     if (stat(conf_file, &stb) != 0) {
 	/*
@@ -359,11 +362,13 @@ open_dirty_bitmap(const char *filename)
          */
         fprintf(stderr, "open_dirty_bitmap: conf file %s does not exist\n",
           conf_file);
+        pthread_mutex_unlock(&backup_mutex);
         return NULL;
     }
     /* conf file exists */
     if (stat(filename, &sta) != 0) {
         /* filename does not exist? */
+        pthread_mutex_unlock(&backup_mutex);
         return NULL;
     }
     if (sta.st_mtime > stb.st_mtime) {
@@ -406,6 +411,7 @@ open_dirty_bitmap(const char *filename)
         fprintf(stderr,
                 "open_dirty_bitmap: error allocating backup_disk for %s\n",
                 filename);
+        pthread_mutex_unlock(&backup_mutex);
         return NULL;
     }
 
@@ -424,6 +430,7 @@ open_dirty_bitmap(const char *filename)
                "open_dirty_bitmap: error allocating dirty_bitmap for %s\n",
                filename);
         qemu_free(retv);
+        pthread_mutex_unlock(&backup_mutex);
         return NULL;
     }
 
@@ -434,9 +441,13 @@ open_dirty_bitmap(const char *filename)
     if (!dirty_bitmap_valid) {
         memset(retv->dirty_bitmap, 0xff, retv->dirty_bitmap_len);
         retv->bdinfo.dirty_blocks = retv->bdinfo.max_blocks;
+        pthread_mutex_unlock(&backup_mutex);
+fprintf(stderr, "open_dirty_bitmap: Exit. file %s, retv %p\n", filename, retv);
         return retv;
     }
     read_in_dirty_bitmap(dirty_bitmap_file, &retv->dirty_bitmap, retv->dirty_bitmap_len);
+    pthread_mutex_unlock(&backup_mutex);
+fprintf(stderr, "open_dirty_bitmap: Exit. file %s, retv %p\n", filename, retv);
     return retv;
 }
 
@@ -448,6 +459,7 @@ close_dirty_bitmap(BlockDriverState *bs)
 
     pthread_mutex_lock(&backup_mutex);
 
+fprintf(stderr, "close_dirty_bitmap: Entered. bs %p, file %s\n", bs, bs->filename);
     bd = (backup_disk *) bs->backup_disk;
     if (bd != NULL) {
 

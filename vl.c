@@ -163,6 +163,7 @@ int main(int argc, char **argv)
 #include "arch_init.h"
 
 #include "ui/qemu-spice.h"
+#include "livebackup.h"
 
 //#define DEBUG_NET
 //#define DEBUG_SLIRP
@@ -2870,6 +2871,7 @@ int main(int argc, char **argv, char **envp)
                 }
             case QEMU_OPTION_backup_port:
                 backup_port = (char *) optarg;
+fprintf(stderr, "XXXXXXXXXXXXX backup_port %s\n", backup_port);
                 break;
             default:
                 os_parse_cmd_args(popt->index, optarg);
@@ -3035,6 +3037,8 @@ int main(int argc, char **argv, char **envp)
     bdrv_init_with_whitelist();
 
     blk_mig_init();
+
+    start_backup_listener();
 
     /* open the virtual block devices */
     if (snapshot)
