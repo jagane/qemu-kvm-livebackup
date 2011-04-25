@@ -119,7 +119,8 @@ version-obj-$(CONFIG_WIN32) += version.o
 ######################################################################
 
 qemu-img.o: qemu-img-cmds.h
-qemu-img.o qemu-tool.o qemu-nbd.o qemu-io.o cmd.o: $(GENERATED_HEADERS)
+livebackup_client.o: livebackup.h
+qemu-img.o qemu-tool.o qemu-nbd.o qemu-io.o cmd.o livebackup_client.o: $(GENERATED_HEADERS)
 
 qemu-img$(EXESUF): qemu-img.o qemu-tool.o qemu-error.o $(oslib-obj-y) $(trace-obj-y) $(block-obj-y) $(qobject-obj-y) $(version-obj-y) qemu-timer-common.o
 
@@ -129,6 +130,8 @@ qemu-io$(EXESUF): qemu-io.o cmd.o qemu-tool.o qemu-error.o $(oslib-obj-y) $(trac
 
 qemu-img-cmds.h: $(SRC_PATH)/qemu-img-cmds.hx
 	$(call quiet-command,sh $(SRC_PATH)/scripts/hxtool -h < $< > $@,"  GEN   $@")
+
+livebackup_client$(EXESUF): livebackup_client.o qemu-tool.o qemu-error.o $(oslib-obj-y) $(trace-obj-y) $(block-obj-y) $(qobject-obj-y) $(version-obj-y) qemu-timer-common.o
 
 check-qint.o check-qstring.o check-qdict.o check-qlist.o check-qfloat.o check-qjson.o: $(GENERATED_HEADERS)
 
@@ -326,6 +329,7 @@ tarbin:
 	$(patsubst %,$(bindir)/%, $(USER_PROGS)) \
 	$(bindir)/qemu-img \
 	$(bindir)/qemu-nbd \
+	$(bindir)/livebackup_client \
 	$(datadir)/bios.bin \
 	$(datadir)/vgabios.bin \
 	$(datadir)/vgabios-cirrus.bin \

@@ -1,3 +1,16 @@
+/*
+ * QEMU livebackup
+ *
+ * Copyright (c) Jagane Sundar
+ *
+ * Authors:
+ *  Jagane Sundar (jagane@sundar.org)
+ *
+ * This work is licensed under the terms of the GNU GPL, version 2.  See
+ * the COPYING file in the top-level directory.
+ *
+ */
+
 #ifndef _LIVEBACKUP_H_
 #define _LIVEBACKUP_H_
 
