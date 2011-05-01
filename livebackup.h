@@ -242,12 +242,17 @@ write_conf_file(char *cfil, int64_t gen, int64_t snap)
 }
 
 
-typedef struct _backup_disk {
+typedef struct _backup_disk_base {
     backup_disk_info bdinfo;
     char        conf_file[PATH_MAX];
     char        snap_file[PATH_MAX];
     char        dirty_bitmap_file[PATH_MAX];
     int         dirty_bitmap_len;
+    unsigned char *dirty_bitmap;
+} backup_disk_base;
+
+typedef struct _backup_disk_snap {
+    backup_disk_base bd_base;
     /*
      * backup_base_bs and backup_cow_bs are used
      * only by the backup_disk struct in the snap,
@@ -255,9 +260,13 @@ typedef struct _backup_disk {
      */
     BlockDriverState *backup_base_bs;
     BlockDriverState *backup_cow_bs;
-    unsigned char *dirty_bitmap;
     unsigned char *in_cow_bitmap;
     int64_t       in_cow_bitmap_count;
+    struct _backup_disk_snap *next;
+} backup_disk_snap;
+
+typedef struct _backup_disk {
+    backup_disk_base bd_base;
     /*
      * snap_backup_disk is used only 
      * in the main drive list
@@ -265,12 +274,12 @@ typedef struct _backup_disk {
      * It is used to save a pointer to the backup_disk
      * struct in the snapshot
      */
-    struct _backup_disk *snap_backup_disk;
+    backup_disk_snap *snap_backup_disk;
     struct _backup_disk *next;
 } backup_disk;
 
 typedef struct _snapshot {
-    backup_disk *backup_disks;
+    backup_disk_snap *backup_disks;
     BlockDriver *backup_snap_drv;
     unsigned char *backup_tmp_buffer;
 } snapshot;
