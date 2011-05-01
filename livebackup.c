@@ -67,13 +67,24 @@ aiowrite_cb_interposer(void *opaque, int ret)
         call_cb = 1;
         goto unlock_and_exit;
     }
+    snap_bd = bd->snap_backup_disk;
 
     if (ac->state == AIOWR_INTERPOSER_COW_READ) {
         /* COW read completed. Initiate COW write */
 // fprintf(stderr, "[D:%d@%ld to %p(%p,%p)]\n", ac->nb_sectors, ac->sector_num, ac->buf, ac->cb, ac->opaque);
+        if (!in_progress_snap) {
+            /*
+             * The snapshot was removed before this COW read completed
+             * Just redirect to the actual write
+             */
+fprintf(stderr, "aiowrite_cb_interposer: snap got deleted before COW read completed\n");
+            remove_from_interposer_list(ac);
+            free(ac);
+            call_cb = 1;
+            goto unlock_and_exit;
+        }
         if (ret == 0) {
             ac->state = AIOWR_INTERPOSER_COW_WRITE;
-            snap_bd = bd->snap_backup_disk;
             bdrv_aio_writev(snap_bd->backup_cow_bs,
                            ac->sector_num, ac->cow_tmp_qiov, ac->nb_sectors,
                            aiowrite_cb_interposer, ac);
@@ -89,7 +100,21 @@ aiowrite_cb_interposer(void *opaque, int ret)
     } else if(ac->state == AIOWR_INTERPOSER_COW_WRITE) {
         /* COW write completed. Initiate actual write */
 // fprintf(stderr, "[E:%d@%ld to %p(%p,%p)]\n", ac->nb_sectors, ac->sector_num, ac->buf, ac->cb, ac->opaque);
+        if (!in_progress_snap) {
+            /*
+             * The snapshot was removed before this COW write completed
+             * Just redirect to the actual write
+             */
+fprintf(stderr, "aiowrite_cb_interposer: snap got deleted before COW read completed\n");
+            remove_from_interposer_list(ac);
+            free(ac);
+            call_cb = 1;
+            goto unlock_and_exit;
+        }
         if (ret == 0) {
+            /* Set this block's bit in the in_cow_bitmap */
+            set_blocks_dirty(snap_bd->in_cow_bitmap, ac->sector_num, ac->nb_sectors, &snap_bd->in_cow_bitmap_count);
+
             ac->state = AIOWR_INTERPOSER_ACTUAL_WRITE;
             qemu_free(ac->cow_tmp_buffer);
             ac->cow_tmp_buffer = NULL;
@@ -371,9 +396,9 @@ open_dirty_bitmap(const char *filename)
 	/*
          * conf file does not exist. This virtual disk is not part of the
          * disks that are backed up
-         */
         fprintf(stderr, "open_dirty_bitmap: conf file %s does not exist\n",
           conf_file);
+         */
         return NULL;
     }
     /* conf file exists */
@@ -470,7 +495,7 @@ close_dirty_bitmap(BlockDriverState *bs)
     if (bd != NULL) {
 
         /*
-         * If we're shutting down while a snap is in progress, then OR the snap's
+         * If we're shutting down while a snap is active, then OR the snap's
          * dirty bitmap with this one, and roll back the snapnumber by one
          */
         if (in_progress_snap) {
@@ -500,8 +525,10 @@ close_dirty_bitmap(BlockDriverState *bs)
                 }
 	    }
             close(dfd);
+            /*
             fprintf(stderr, "Wrote a dirty_bitmap %s of len %d\n",
 	        bd->dirty_bitmap_file, bd->dirty_bitmap_len);
+             */
         } else {
             fprintf(stderr, "Error %d opening %s while writing out dirty bitmap\n",
                 errno, bd->dirty_bitmap_file);

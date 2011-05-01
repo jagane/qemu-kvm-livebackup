@@ -292,7 +292,12 @@ is_incremental_possible_1_vdisk(char *local_vm_dir, backup_disk_info *bd)
     }
     if (stat(conf_file, &stconf) == 0) {
         if (stat(vdisk_file, &stv) == 0) {
-            if (stconf.st_mtime > stv.st_mtime) {
+#ifdef CONFIG_LINUX
+            if ((stconf.st_mtime > stv.st_mtime) ||
+		((stconf.st_mtime == stv.st_mtime) && (stconf.st_mtim.tv_nsec > stv.st_mtim.tv_nsec))) {
+#else
+            if (stconf.st_mtime >= stv.st_mtime) {
+#endif
                 /* conf file was modified later than vdisk file */
                 int64_t full_backup_mtime;
                 int64_t snap;

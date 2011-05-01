@@ -2871,7 +2871,6 @@ int main(int argc, char **argv, char **envp)
                 }
             case QEMU_OPTION_backup_port:
                 backup_port = (char *) optarg;
-fprintf(stderr, "XXXXXXXXXXXXX backup_port %s\n", backup_port);
                 break;
             default:
                 os_parse_cmd_args(popt->index, optarg);
