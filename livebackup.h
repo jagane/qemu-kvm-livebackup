@@ -251,35 +251,23 @@ typedef struct _backup_disk_base {
     unsigned char *dirty_bitmap;
 } backup_disk_base;
 
-typedef struct _backup_disk_snap {
+typedef struct _livebackup_snap {
     backup_disk_base bd_base;
-    /*
-     * backup_base_bs and backup_cow_bs are used
-     * only by the backup_disk struct in the snap,
-     * not in the main drive list
-     */
     BlockDriverState *backup_base_bs;
     BlockDriverState *backup_cow_bs;
     unsigned char *in_cow_bitmap;
     int64_t       in_cow_bitmap_count;
-    struct _backup_disk_snap *next;
-} backup_disk_snap;
+    struct _livebackup_snap *next;
+} livebackup_snap;
 
-typedef struct _backup_disk {
+typedef struct _livebackup_disk {
     backup_disk_base bd_base;
-    /*
-     * snap_backup_disk is used only 
-     * in the main drive list
-     * and not in the backup_disk struct in the snap
-     * It is used to save a pointer to the backup_disk
-     * struct in the snapshot
-     */
-    backup_disk_snap *snap_backup_disk;
-    struct _backup_disk *next;
-} backup_disk;
+    livebackup_snap *snap_backup_disk;
+    struct _livebackup_disk *next;
+} livebackup_disk;
 
 typedef struct _snapshot {
-    backup_disk_snap *backup_disks;
+    livebackup_snap *backup_disks;
     BlockDriver *backup_snap_drv;
     unsigned char *backup_tmp_buffer;
 } snapshot;
@@ -306,12 +294,12 @@ typedef struct _aiowr_interposer {
     struct _aiowr_interposer *next;
 } aiowr_interposer;
 
-backup_disk *open_dirty_bitmap(const char *filename);
+livebackup_disk *open_dirty_bitmap(const char *filename);
 void close_dirty_bitmap(BlockDriverState *bs);
 void aiowrite_cb_interposer(void *opaque, int ret);
 void set_dirty(BlockDriverState *bs, int64_t sector_num,
                                  int nb_sectors);
-BlockDriverAIOCB *set_dirty_and_start_async(BlockDriverState *bs, int64_t sector_num,
+BlockDriverAIOCB *livebackup_interposer(BlockDriverState *bs, int64_t sector_num,
                                  QEMUIOVector *qiov, int nb_sectors,
                                  BlockDriverCompletionFunc *cb, void *opaque);
 int start_backup_listener(void);

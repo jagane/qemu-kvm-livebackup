@@ -462,12 +462,12 @@ static int bdrv_open_common(BlockDriverState *bs, const char *filename,
         open_flags |= BDRV_O_RDWR;
     }
 
-    bs->backup_disk = NULL;
+    bs->livebackup_disk = NULL;
 
     /* Open the image, either directly or using a protocol */
     if (drv->bdrv_file_open) {
         if (flags & BDRV_O_RDWR) {
-            bs->backup_disk = open_dirty_bitmap(filename);
+            bs->livebackup_disk = open_dirty_bitmap(filename);
         }
         ret = drv->bdrv_file_open(bs, filename, open_flags);
     } else {
@@ -496,7 +496,7 @@ static int bdrv_open_common(BlockDriverState *bs, const char *filename,
     return 0;
 
 free_and_fail:
-    if (bs->backup_disk != NULL) {
+    if (bs->livebackup_disk != NULL) {
         close_dirty_bitmap(bs);
     }
     if (bs->file) {
@@ -690,7 +690,7 @@ void bdrv_close(BlockDriverState *bs)
             bdrv_close(bs->file);
         }
 
-        if (bs->backup_disk) {
+        if (bs->livebackup_disk) {
             close_dirty_bitmap(bs);
         }
 
@@ -1001,7 +1001,7 @@ int bdrv_write(BlockDriverState *bs, int64_t sector_num,
     if (bs->dirty_bitmap) {
         set_dirty_bitmap(bs, sector_num, nb_sectors, 1);
     }
-    if (bs->backup_disk) {
+    if (bs->livebackup_disk) {
         set_dirty(bs, sector_num, nb_sectors);
     }
 
@@ -2249,9 +2249,9 @@ BlockDriverAIOCB *bdrv_aio_writev(BlockDriverState *bs, int64_t sector_num,
         opaque = blk_cb_data;
     }
 
-    if (bs->backup_disk) {
+    if (bs->livebackup_disk) {
 // fprintf(stderr, "[A:%d@%ld to %p(%p,%p)]\n", nb_sectors, sector_num, buf, cb, opaque);
-        ret = set_dirty_and_start_async(bs, sector_num, qiov,
+        ret = livebackup_interposer(bs, sector_num, qiov,
                                nb_sectors, cb, opaque);
     } else {
         ret = drv->bdrv_aio_writev(bs, sector_num, qiov, nb_sectors,

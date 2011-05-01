@@ -202,7 +202,7 @@ struct BlockDriverState {
     int in_use; /* users other than guest access, eg. block migration */
     QTAILQ_ENTRY(BlockDriverState) list;
     void *private;
-    void *backup_disk;
+    void *livebackup_disk;
 };
 
 #define CHANGE_MEDIA	0x01

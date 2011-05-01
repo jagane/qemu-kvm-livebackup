@@ -13,7 +13,7 @@
 
 #include "livebackup.h"
 
-static backup_disk *backup_disks = NULL;
+static livebackup_disk *backup_disks = NULL;
 
 static aiowr_interposer *aiowr_interposers = NULL;
 
@@ -50,8 +50,8 @@ aiowrite_cb_interposer(void *opaque, int ret)
     BlockDriverCompletionFunc *saved_cb;
     void *saved_opaque;
     BlockDriverState *bs;
-    backup_disk *bd;
-    backup_disk_snap *snap_bd;
+    livebackup_disk *bd;
+    livebackup_snap *snap_bd;
     int call_cb = 0;
 
     pthread_mutex_lock(&backup_mutex);
@@ -60,7 +60,7 @@ aiowrite_cb_interposer(void *opaque, int ret)
     saved_opaque = ac->opaque;
 
     bs = ac->bs;
-    bd = bs->backup_disk;
+    bd = bs->livebackup_disk;
     if (!bd) {
         fprintf(stderr, "aiowrite_cb_interposer: Error. bd null\n");
         ret = -1;
@@ -77,7 +77,6 @@ aiowrite_cb_interposer(void *opaque, int ret)
              * The snapshot was removed before this COW read completed
              * Just redirect to the actual write
              */
-fprintf(stderr, "aiowrite_cb_interposer: snap got deleted before COW read completed\n");
             remove_from_interposer_list(ac);
             free(ac);
             call_cb = 1;
@@ -105,7 +104,6 @@ fprintf(stderr, "aiowrite_cb_interposer: snap got deleted before COW read comple
              * The snapshot was removed before this COW write completed
              * Just redirect to the actual write
              */
-fprintf(stderr, "aiowrite_cb_interposer: snap got deleted before COW read completed\n");
             remove_from_interposer_list(ac);
             free(ac);
             call_cb = 1;
@@ -158,8 +156,8 @@ static inline void
 copy_cow_blocks(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
 {
     if (in_progress_snap) {
-        backup_disk *bd = (backup_disk *) bs->backup_disk;
-        backup_disk_snap *snap_bd = bd->snap_backup_disk;
+        livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
+        livebackup_snap *snap_bd = bd->snap_backup_disk;
         int i;
 
         /* Create COW of each block that's in the backup snapshot's dirty bitmap */
@@ -189,8 +187,8 @@ void
 set_dirty(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
 {
     pthread_mutex_lock(&backup_mutex);
-    if (bs->backup_disk) {
-        backup_disk *bd = (backup_disk *) bs->backup_disk;
+    if (bs->livebackup_disk) {
+        livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
 
         set_blocks_dirty(bd->bd_base.dirty_bitmap, sector_num, nb_sectors, &bd->bd_base.bdinfo.dirty_blocks);
         copy_cow_blocks(bs, sector_num, nb_sectors);
@@ -203,8 +201,8 @@ static inline int
 is_copy_cow_necessary(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
 {
     if (in_progress_snap) {
-        backup_disk *bd = (backup_disk *) bs->backup_disk;
-        backup_disk_snap *snap_bd = bd->snap_backup_disk;
+        livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
+        livebackup_snap *snap_bd = bd->snap_backup_disk;
         int i;
 
         for (i = 0; i < nb_sectors; i++) {
@@ -219,7 +217,7 @@ is_copy_cow_necessary(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
 }
 
 BlockDriverAIOCB *
-set_dirty_and_start_async(BlockDriverState *bs, int64_t sector_num,
+livebackup_interposer(BlockDriverState *bs, int64_t sector_num,
                                  QEMUIOVector *qiov, int nb_sectors,
                                  BlockDriverCompletionFunc *cb, void *opaque)
 {
@@ -227,8 +225,8 @@ set_dirty_and_start_async(BlockDriverState *bs, int64_t sector_num,
     BlockDriverAIOCB *ret = NULL;
 
     pthread_mutex_lock(&backup_mutex);
-    if (bs->backup_disk) {
-        backup_disk *bd = (backup_disk *) bs->backup_disk;
+    if (bs->livebackup_disk) {
+        livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
 
         set_blocks_dirty(bd->bd_base.dirty_bitmap, sector_num, nb_sectors, &bd->bd_base.bdinfo.dirty_blocks);
 
@@ -245,7 +243,7 @@ set_dirty_and_start_async(BlockDriverState *bs, int64_t sector_num,
 
         if (is_copy_cow_necessary(bs, sector_num, nb_sectors)) {
             /* COW is necessary. Initiate the COW read */
-            backup_disk_snap *snap_bd = bd->snap_backup_disk;
+            livebackup_snap *snap_bd = bd->snap_backup_disk;
             ac->state = AIOWR_INTERPOSER_COW_READ;
             ac->cow_tmp_buffer = qemu_memalign(512, nb_sectors * BACKUP_BLOCK_SIZE);
             ac->cow_tmp_qiov = qemu_mallocz(sizeof(*qiov));
@@ -269,10 +267,10 @@ set_dirty_and_start_async(BlockDriverState *bs, int64_t sector_num,
 }
 
 static int
-remove_from_backup_disk_list(backup_disk *bd)
+remove_from_backup_disk_list(livebackup_disk *bd)
 {
-    backup_disk *prev = NULL;
-    backup_disk *cur = backup_disks;
+    livebackup_disk *prev = NULL;
+    livebackup_disk *cur = backup_disks;
 
     while (cur != NULL) {
             if (cur == bd) {
@@ -290,10 +288,10 @@ remove_from_backup_disk_list(backup_disk *bd)
 }
 
 static void
-append_to_list(backup_disk **list_head, backup_disk *bd)
+append_to_list(livebackup_disk **list_head, livebackup_disk *bd)
 {
-        backup_disk *prev = NULL;
-        backup_disk *cur = *list_head;
+        livebackup_disk *prev = NULL;
+        livebackup_disk *cur = *list_head;
 
         while (cur != NULL) {
             prev = cur;
@@ -308,10 +306,10 @@ append_to_list(backup_disk **list_head, backup_disk *bd)
 }
 
 static void
-append_to_snap_list(backup_disk_snap **list_head, backup_disk_snap *bd)
+append_to_snap_list(livebackup_snap **list_head, livebackup_snap *bd)
 {
-        backup_disk_snap *prev = NULL;
-        backup_disk_snap *cur = *list_head;
+        livebackup_snap *prev = NULL;
+        livebackup_snap *cur = *list_head;
 
         while (cur != NULL) {
             prev = cur;
@@ -328,7 +326,7 @@ append_to_snap_list(backup_disk_snap **list_head, backup_disk_snap *bd)
 static int
 get_num_backup_disks(void)
 {
-    backup_disk *cur = backup_disks;
+    livebackup_disk *cur = backup_disks;
     int count = 0;
 
     while (cur != NULL) {
@@ -395,7 +393,7 @@ read_in_dirty_bitmap(char *filename, unsigned char **dbmp, int dbmp_len)
  * conf file correctly and exit cleanly. Hence the backup must become
  * a full backup.
  */
-backup_disk *
+livebackup_disk *
 open_dirty_bitmap(const char *filename)
 {
     char dirty_bitmap_file[PATH_MAX];
@@ -405,7 +403,7 @@ open_dirty_bitmap(const char *filename)
     int64_t full_backup_mtime = 0;
     int64_t snap = 0;
     int dirty_bitmap_valid = 0;
-    backup_disk *retv;
+    livebackup_disk *retv;
 
 
     sprintf(conf_file, "%s.livebackupconf", filename);
@@ -458,10 +456,10 @@ open_dirty_bitmap(const char *filename)
     snprintf(snap_file, sizeof(snap_file),
                 "%s.snap.qcow", filename);
 
-    retv = qemu_mallocz(sizeof(backup_disk));
+    retv = qemu_mallocz(sizeof(livebackup_disk));
     if (!retv) {
         fprintf(stderr,
-                "open_dirty_bitmap: error allocating backup_disk for %s\n",
+                "open_dirty_bitmap: error allocating livebackup_disk for %s\n",
                 filename);
         return NULL;
     }
@@ -504,11 +502,11 @@ void
 close_dirty_bitmap(BlockDriverState *bs)
 {
     int dfd;
-    backup_disk *bd;
+    livebackup_disk *bd;
 
     pthread_mutex_lock(&backup_mutex);
 
-    bd = (backup_disk *) bs->backup_disk;
+    bd = (livebackup_disk *) bs->livebackup_disk;
     if (bd != NULL) {
 
         /*
@@ -518,7 +516,7 @@ close_dirty_bitmap(BlockDriverState *bs)
         if (in_progress_snap) {
             if (bd->snap_backup_disk) {
                 int64_t it;
-                backup_disk_snap *snbd =  bd->snap_backup_disk;
+                livebackup_snap *snbd =  bd->snap_backup_disk;
 
                 for (it = 0; it < bd->bd_base.bdinfo.max_blocks; it++) {
                     if (is_block_dirty(snbd->bd_base.dirty_bitmap, it)) {
@@ -558,7 +556,7 @@ close_dirty_bitmap(BlockDriverState *bs)
         bd->bd_base.dirty_bitmap = NULL;
         bd->bd_base.dirty_bitmap_len = 0;
         qemu_free(bd);
-        bs->backup_disk = NULL;
+        bs->livebackup_disk = NULL;
     }
     pthread_mutex_unlock(&backup_mutex);
 }
@@ -580,7 +578,7 @@ backup_get_vdisk_count(int fd)
 
     if (res.status > 0) {
 	if (in_progress_snap != NULL) {
-            backup_disk_snap *itr = in_progress_snap->backup_disks;
+            livebackup_snap *itr = in_progress_snap->backup_disks;
             while (itr) {
                 bw = write_bytes(fd, (unsigned char *) &itr->bd_base.bdinfo,
                              sizeof(itr->bd_base.bdinfo));
@@ -593,7 +591,7 @@ backup_get_vdisk_count(int fd)
                 itr = itr->next;
             }
 	} else {
-            backup_disk *itr = backup_disks;
+            livebackup_disk *itr = backup_disks;
             while (itr) {
                 bw = write_bytes(fd, (unsigned char *) &itr->bd_base.bdinfo,
                              sizeof(itr->bd_base.bdinfo));
@@ -610,10 +608,10 @@ backup_get_vdisk_count(int fd)
     return 0;
 }
 
-static backup_disk_snap *
-create_backup_disk_for_snap(backup_disk *in)
+static livebackup_snap *
+create_backup_disk_for_snap(livebackup_disk *in)
 {
-    backup_disk_snap *out;
+    livebackup_snap *out;
     out = qemu_mallocz(sizeof(*out));
     if (out == NULL) {
         fprintf(stderr, "create_backup_disk_for_snap: alloc of backup_disk failed\n");
@@ -651,7 +649,7 @@ static int
 backup_do_snap(int fd, backup_request *req)
 {
     do_snap_result res;
-    backup_disk *itr;
+    livebackup_disk *itr;
 
     pthread_mutex_lock(&backup_mutex);
 
@@ -700,7 +698,7 @@ backup_do_snap(int fd, backup_request *req)
     in_progress_snap->backup_disks = NULL;
     itr = backup_disks;
     while (itr != NULL) {
-        backup_disk_snap *new_bd = NULL;
+        livebackup_snap *new_bd = NULL;
         unsigned char *new_dirty_bitmap = NULL;
         unsigned char *in_cow_bitmap = NULL;
 
@@ -804,11 +802,11 @@ write_result_and_exit:
     }
 }
 
-static backup_disk_snap *
+static livebackup_snap *
 get_backup_disk(snapshot *snapsh, int disk_number)
 {
     int i = 0;
-    backup_disk_snap *itr = snapsh->backup_disks;
+    livebackup_snap *itr = snapsh->backup_disks;
     while (itr != NULL) {
         if (disk_number == i) {
             return itr;
@@ -823,7 +821,7 @@ static int
 backup_get_blocks(int fd, backup_request *req)
 {
     get_blocks_result res;
-    backup_disk_snap *bd;
+    livebackup_snap *bd;
     int64_t off = 0;
     int num = 0;
     int write_data = 0;
@@ -893,8 +891,8 @@ static int
 backup_destroy_snap(int fd, backup_request *req)
 {
     destroy_snap_result res;
-    backup_disk_snap *itr;
-    backup_disk *bitr;
+    livebackup_snap *itr;
+    livebackup_disk *bitr;
 
     pthread_mutex_lock(&backup_mutex);
 
@@ -908,7 +906,7 @@ backup_destroy_snap(int fd, backup_request *req)
     /* walk the list of backup_disks in this snapshot and clean them out */
     itr = in_progress_snap->backup_disks;
     while (itr != NULL) {
-        backup_disk_snap *save;
+        livebackup_snap *save;
         qemu_free(itr->bd_base.dirty_bitmap);
         qemu_free(itr->in_cow_bitmap);
         if (itr->backup_base_bs) bdrv_close(itr->backup_base_bs);
