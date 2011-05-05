@@ -83,6 +83,10 @@ static QemuOptsList qemu_drive_opts = {
             .name = "boot",
             .type = QEMU_OPT_BOOL,
             .help = "make this a boot drive",
+        },{
+            .name = "livebackup",
+            .type = QEMU_OPT_BOOL,
+            .help = "enable livebackup for this drive",
         },
         { /* end of list */ }
     },

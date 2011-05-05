@@ -120,7 +120,7 @@ DEF("drive", HAS_ARG, QEMU_OPTION_drive,
     "       [,cyls=c,heads=h,secs=s[,trans=t]][,snapshot=on|off]\n"
     "       [,cache=writethrough|writeback|none|unsafe][,format=f]\n"
     "       [,serial=s][,addr=A][,id=name][,aio=threads|native]\n"
-    "       [,readonly=on|off][,boot=on|off]\n"
+    "       [,readonly=on|off][,boot=on|off][,livebackup=on|off]\n"
     "                use 'file' as a drive image\n", QEMU_ARCH_ALL)
 STEXI
 @item -drive @var{option}[,@var{option}[,@var{option}[,...]]]
@@ -162,6 +162,8 @@ This option specifies the serial number to assign to the device.
 Specify the controller's PCI address (if=virtio only).
 @item boot=@var{boot}
 @var{boot} is "on" or "off" and allows for booting from non-traditional interfaces, such as virtio.
+@item livebackup=@var{livebackup}
+@var{livebackup} is "on", or "off" and selects between enabling livebackup and disabling it
 @end table
 
 By default, writethrough caching is used for all block device.  This means that

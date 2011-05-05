@@ -466,7 +466,7 @@ static int bdrv_open_common(BlockDriverState *bs, const char *filename,
 
     /* Open the image, either directly or using a protocol */
     if (drv->bdrv_file_open) {
-        if (flags & BDRV_O_RDWR) {
+        if (flags & BDRV_O_RDWR && flags & BDRV_O_LIVEBACKUP) {
             bs->livebackup_disk = open_dirty_bitmap(filename);
         }
         ret = drv->bdrv_file_open(bs, filename, open_flags);

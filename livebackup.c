@@ -407,22 +407,16 @@ open_dirty_bitmap(const char *filename)
 
 
     sprintf(conf_file, "%s.livebackupconf", filename);
-    if (stat(conf_file, &stb) != 0) {
-	/*
-         * conf file does not exist. This virtual disk is not part of the
-         * disks that are backed up
-        fprintf(stderr, "open_dirty_bitmap: conf file %s does not exist\n",
-          conf_file);
-         */
-        return NULL;
-    }
-    /* conf file exists */
     if (stat(filename, &sta) != 0) {
         /* filename does not exist? */
         return NULL;
     }
-    if (sta.st_mtime > stb.st_mtime) {
-        /* conf file was modified before vdisk file. New full backup */
+    if ((stat(conf_file, &stb) != 0) || (sta.st_mtime > stb.st_mtime)) {
+        /*
+         * conf file does not exist, or
+         * conf file was modified before vdisk file.
+         * New full backup
+         */
         fprintf(stderr, "open_dirty_bitmap: Conf\n\t%s - %s"
             " was modified before vdisk\n\t%s - %s."
             " Hence dirty_bitmap is invalid.",
@@ -432,7 +426,12 @@ open_dirty_bitmap(const char *filename)
         dirty_bitmap_valid = 0;
         write_conf_file(conf_file, full_backup_mtime, snap);
     } else {
-        /* conf file was modified after vdisk file. Incremental backup */
+        /*
+         * conf file exists, and
+         * conf file was modified after vdisk file.
+         * Hence, dirty bitmap is valid.
+         * Incremental backup is feasible
+         */
         fprintf(stderr, "open_dirty_bitmap: Conf\n\t%s - %s"
                         " is newer than vdisk\n\t%s - %s",
                         conf_file, ctime(&stb.st_mtime),

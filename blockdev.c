@@ -240,6 +240,7 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
     DriveInfo *dinfo;
     int is_extboot = 0;
     int snapshot = 0;
+    int livebackup = 0;
     int ret;
 
     translation = BIOS_ATA_TRANSLATION_AUTO;
@@ -264,6 +265,7 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
 
     snapshot = qemu_opt_get_bool(opts, "snapshot", 0);
     ro = qemu_opt_get_bool(opts, "readonly", 0);
+    livebackup = qemu_opt_get_bool(opts, "livebackup", 0);
 
     file = qemu_opt_get(opts, "file");
     serial = qemu_opt_get(opts, "serial");
@@ -531,6 +533,9 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
         /* always use cache=unsafe with snapshot */
         bdrv_flags &= ~BDRV_O_CACHE_MASK;
         bdrv_flags |= (BDRV_O_SNAPSHOT|BDRV_O_CACHE_WB|BDRV_O_NO_FLUSH);
+    }
+    if (livebackup) {
+        bdrv_flags |= BDRV_O_LIVEBACKUP;
     }
 
     if (media == MEDIA_CDROM) {
