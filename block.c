@@ -2250,7 +2250,6 @@ BlockDriverAIOCB *bdrv_aio_writev(BlockDriverState *bs, int64_t sector_num,
     }
 
     if (bs->livebackup_disk) {
-// fprintf(stderr, "[A:%d@%ld to %p(%p,%p)]\n", nb_sectors, sector_num, buf, cb, opaque);
         ret = livebackup_interposer(bs, sector_num, qiov,
                                nb_sectors, cb, opaque);
     } else {

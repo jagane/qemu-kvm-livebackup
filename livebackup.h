@@ -90,7 +90,8 @@ typedef struct _destroy_snap_result {
 static unsigned char mp[8] = { 128, 64, 32, 16, 8, 4, 2, 1};
 static unsigned char mpo[8] = { 127, 191, 223, 239, 247, 251, 253, 254};
 
-static inline void set_block_dirty(unsigned char *bitmap, int64_t sector_num, int64_t *count_ptr)
+static inline void set_block_dirty(unsigned char *bitmap, int64_t sector_num,
+                    int64_t *count_ptr)
 {
     int64_t off = sector_num/8;
     int64_t bitoff = sector_num%8;
@@ -129,7 +130,8 @@ is_block_dirty(unsigned char *dirty_bitmap, int64_t block)
  * return < 0 if there are no more dirty blocks
  */
 static inline int
-get_next_dirty_block_offset(unsigned char *dirty_bitmap, int64_t max_blocks_in_dirty_bitmap,
+get_next_dirty_block_offset(unsigned char *dirty_bitmap,
+        int64_t max_blocks_in_dirty_bitmap,
         int64_t curblock, int maxblocks,
         int64_t *ret_block, int *ret_dirty_blocks)
 {
@@ -301,7 +303,8 @@ void close_dirty_bitmap(BlockDriverState *bs);
 void aiowrite_cb_interposer(void *opaque, int ret);
 void set_dirty(BlockDriverState *bs, int64_t sector_num,
                                  int nb_sectors);
-BlockDriverAIOCB *livebackup_interposer(BlockDriverState *bs, int64_t sector_num,
+BlockDriverAIOCB *livebackup_interposer(BlockDriverState *bs,
+                                int64_t sector_num,
                                  QEMUIOVector *qiov, int nb_sectors,
                                  BlockDriverCompletionFunc *cb, void *opaque);
 int start_backup_listener(void);

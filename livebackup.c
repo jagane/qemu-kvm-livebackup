@@ -72,7 +72,6 @@ aiowrite_cb_interposer(void *opaque, int ret)
 
     if (ac->state == AIOWR_INTERPOSER_COW_READ) {
         /* COW read completed. Initiate COW write */
-// fprintf(stderr, "[D:%d@%ld to %p(%p,%p)]\n", ac->nb_sectors, ac->sector_num, ac->buf, ac->cb, ac->opaque);
         if (!in_progress_snap) {
             /*
              * The snapshot was removed before this COW read completed
@@ -99,7 +98,6 @@ aiowrite_cb_interposer(void *opaque, int ret)
         }
     } else if(ac->state == AIOWR_INTERPOSER_COW_WRITE) {
         /* COW write completed. Initiate actual write */
-// fprintf(stderr, "[E:%d@%ld to %p(%p,%p)]\n", ac->nb_sectors, ac->sector_num, ac->buf, ac->cb, ac->opaque);
         if (!in_progress_snap) {
             /*
              * The snapshot was removed before this COW write completed
@@ -112,13 +110,14 @@ aiowrite_cb_interposer(void *opaque, int ret)
         }
         if (ret == 0) {
             /* Set this block's bit in the in_cow_bitmap */
-            set_blocks_dirty(snap_bd->in_cow_bitmap, ac->sector_num, ac->nb_sectors, &snap_bd->in_cow_bitmap_count);
+            set_blocks_dirty(snap_bd->in_cow_bitmap, ac->sector_num,
+                            ac->nb_sectors, &snap_bd->in_cow_bitmap_count);
 
             ac->state = AIOWR_INTERPOSER_ACTUAL_WRITE;
             qemu_free(ac->cow_tmp_buffer);
             ac->cow_tmp_buffer = NULL;
             bs->drv->bdrv_aio_writev(bs, ac->sector_num, ac->qiov,
-						 ac->nb_sectors, aiowrite_cb_interposer, ac);
+                                ac->nb_sectors, aiowrite_cb_interposer, ac);
             call_cb = 0;
         } else {
             fprintf(stderr, "Error in COW write of %d sectors @ %ld\n",
@@ -131,7 +130,6 @@ aiowrite_cb_interposer(void *opaque, int ret)
     } else {
         /* Actual write completed. */
         /* Remove async req from our interposer list */
-// fprintf(stderr, "[F:%d@%ld to %p(%p,%p)]\n", ac->nb_sectors, ac->sector_num, ac->buf, ac->cb, ac->opaque);
         remove_from_interposer_list(ac);
         free(ac);
     
@@ -161,22 +159,29 @@ copy_cow_blocks(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
         livebackup_snap *snap_bd = bd->snap_backup_disk;
         int i;
 
-        /* Create COW of each block that's in the backup snapshot's dirty bitmap */
+        /* Create COW of each block in the backup snapshot's dirty bitmap */
         for (i = 0; i < nb_sectors; i++) {
             if (is_block_dirty(snap_bd->bd_base.dirty_bitmap, sector_num + i)) {
                 /* If sector is in dirty map of snap, then do a COW */
-                if (bdrv_read(bs, sector_num + i, in_progress_snap->backup_tmp_buffer, 1) < 0) {
-                    fprintf(stderr, "copy_cow_blocks: Error. read COW of block %ld failed\n",
-                                    sector_num + i);
+                if (bdrv_read(bs, sector_num + i,
+                                in_progress_snap->backup_tmp_buffer, 1) < 0) {
+                    fprintf(stderr,
+                            "copy_cow_blocks: Error. read COW of "
+                            "block %ld failed\n",
+                            sector_num + i);
                 } else {
                     int rv;
                     if ((rv = bdrv_write(snap_bd->backup_cow_bs, sector_num + i,
                              in_progress_snap->backup_tmp_buffer, 1)) < 0) {
-                        fprintf(stderr, "copy_cow_blocks: Error. write COW of block %ld failed %d\n",
-                                    sector_num + i, rv);
+                        fprintf(stderr,
+                            "copy_cow_blocks: Error. write COW of "
+                            "block %ld failed %d\n",
+                            sector_num + i, rv);
                     } else {
                         /* Set this block's bit in the in_cow_bitmap */
-                        set_block_dirty(snap_bd->in_cow_bitmap, sector_num + i, &snap_bd->in_cow_bitmap_count);
+                        set_block_dirty(snap_bd->in_cow_bitmap,
+                                        sector_num + i,
+                                        &snap_bd->in_cow_bitmap_count);
                     }
                 }
             }
@@ -229,7 +234,8 @@ livebackup_interposer(BlockDriverState *bs, int64_t sector_num,
     if (bs->livebackup_disk) {
         livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
 
-        set_blocks_dirty(bd->bd_base.dirty_bitmap, sector_num, nb_sectors, &bd->bd_base.bdinfo.dirty_blocks);
+        set_blocks_dirty(bd->bd_base.dirty_bitmap, sector_num, nb_sectors,
+                                    &bd->bd_base.bdinfo.dirty_blocks);
 
         ac = calloc(1, sizeof(aiowr_interposer));
         ac->bs = bs;
@@ -246,21 +252,23 @@ livebackup_interposer(BlockDriverState *bs, int64_t sector_num,
             /* COW is necessary. Initiate the COW read */
             livebackup_snap *snap_bd = bd->snap_backup_disk;
             ac->state = AIOWR_INTERPOSER_COW_READ;
-            ac->cow_tmp_buffer = qemu_memalign(512, nb_sectors * BACKUP_BLOCK_SIZE);
+            ac->cow_tmp_buffer = qemu_memalign(512,
+                            nb_sectors * BACKUP_BLOCK_SIZE);
             ac->cow_tmp_qiov = qemu_mallocz(sizeof(*qiov));
             qemu_iovec_init(ac->cow_tmp_qiov, 1);
-            qemu_iovec_add(ac->cow_tmp_qiov, ac->cow_tmp_buffer, nb_sectors * BACKUP_BLOCK_SIZE);
+            qemu_iovec_add(ac->cow_tmp_qiov, ac->cow_tmp_buffer,
+                            nb_sectors * BACKUP_BLOCK_SIZE);
 
-// fprintf(stderr, "[B:%d@%ld to %p(%p,%p)]\n", nb_sectors, sector_num, buf, cb, opaque);
 
-            ret = snap_bd->backup_base_bs->drv->bdrv_aio_readv(snap_bd->backup_base_bs, sector_num, ac->cow_tmp_qiov,
-						 nb_sectors, aiowrite_cb_interposer, ac);
+            ret = snap_bd->backup_base_bs->drv->bdrv_aio_readv(
+                    snap_bd->backup_base_bs, sector_num, ac->cow_tmp_qiov,
+                    nb_sectors, aiowrite_cb_interposer, ac);
         } else {
             /* COW is not necessary. Initiate the actual write */
             ac->state = AIOWR_INTERPOSER_ACTUAL_WRITE;
 
-// fprintf(stderr, "[C:%d@%ld to %p(%p,%p)]\n", nb_sectors, sector_num, buf, cb, opaque);
-            ret = bs->drv->bdrv_aio_writev(bs, sector_num, qiov, nb_sectors, aiowrite_cb_interposer, ac);
+            ret = bs->drv->bdrv_aio_writev(bs, sector_num, qiov,
+                                nb_sectors, aiowrite_cb_interposer, ac);
         }
     }
     pthread_mutex_unlock(&backup_mutex);
@@ -284,7 +292,8 @@ remove_from_backup_disk_list(livebackup_disk *bd)
             prev = cur;
             cur = cur->next;
     }
-    fprintf(stderr, "Cannot find backup_disk %s in list\n", bd->bd_base.bdinfo.name);
+    fprintf(stderr, "Cannot find backup_disk %s in list\n",
+                    bd->bd_base.bdinfo.name);
     return -1;
 }
 
@@ -303,7 +312,7 @@ append_to_list(livebackup_disk **list_head, livebackup_disk *bd)
         } else {
             *list_head = bd;
         }
-	bd->next = NULL;
+        bd->next = NULL;
 }
 
 static void
@@ -321,7 +330,7 @@ append_to_snap_list(livebackup_snap **list_head, livebackup_snap *bd)
         } else {
             *list_head = bd;
         }
-	bd->next = NULL;
+        bd->next = NULL;
 }
 
 static int
@@ -347,7 +356,8 @@ read_in_dirty_bitmap(char *filename, unsigned char **dbmp, int dbmp_len)
         if (fstat(dfd, &stb) == 0) {
             if (dbmp_len != stb.st_size) {
                 fprintf(stderr,
-                    "read_in_dirty_bitmap: error in dirty bitmap len(%d,%ld) of %s\n",
+                    "read_in_dirty_bitmap: error in dirty "
+                    "bitmap len(%d,%ld) of %s\n",
                     dbmp_len, stb.st_size, filename);
                 qemu_free(*dbmp);
                 *dbmp = NULL;
@@ -356,20 +366,23 @@ read_in_dirty_bitmap(char *filename, unsigned char **dbmp, int dbmp_len)
                 int rrv = read(dfd, *dbmp, stb.st_size);
                 if (rrv != stb.st_size) {
                     fprintf(stderr,
-                        "read_in_dirty_bitmap: error %d reading dirty_bitmap from %s\n",
+                        "read_in_dirty_bitmap: error %d reading "
+                        "dirty_bitmap from %s\n",
                         errno, filename);
                     qemu_free(*dbmp);
                     *dbmp = NULL;
                     return -1;
                 } else {
                     fprintf(stderr,
-                      "read_in_dirty_bitmap: read %d byts from existing dirty_bitmap fl %s\n",
+                      "read_in_dirty_bitmap: read %d byts "
+                      "from existing dirty_bitmap fl %s\n",
                       rrv, filename);
                     return 0;
                 }
             }
         } else {
-            fprintf(stderr, "read_in_dirty_bitmap: error %d stat of %s\n", errno, filename);
+            fprintf(stderr,
+                "read_in_dirty_bitmap: error %d stat of %s\n", errno, filename);
             return -1;
         }
     } else {
@@ -414,13 +427,13 @@ MurmurHashNeutral2 ( const void * key, int len, unsigned int seed )
         data += 4;
         len -= 4;
     }
-	
+        
     switch(len)
     {
     case 3: h ^= data[2] << 16;
     case 2: h ^= data[1] << 8;
     case 1: h ^= data[0];
-	        h *= m;
+                h *= m;
     };
 
     h ^= h >> 13;
@@ -528,10 +541,14 @@ open_dirty_bitmap(const char *filename)
         return NULL;
     }
 
-    strncpy(retv->bd_base.bdinfo.name, filename, sizeof(retv->bd_base.bdinfo.name));
-    strncpy(retv->bd_base.conf_file, conf_file, sizeof(retv->bd_base.conf_file));
-    strncpy(retv->bd_base.dirty_bitmap_file, dirty_bitmap_file, sizeof(retv->bd_base.dirty_bitmap_file));
-    strncpy(retv->bd_base.snap_file, snap_file, sizeof(retv->bd_base.snap_file));
+    strncpy(retv->bd_base.bdinfo.name, filename,
+                                sizeof(retv->bd_base.bdinfo.name));
+    strncpy(retv->bd_base.conf_file, conf_file,
+                                sizeof(retv->bd_base.conf_file));
+    strncpy(retv->bd_base.dirty_bitmap_file, dirty_bitmap_file,
+                                sizeof(retv->bd_base.dirty_bitmap_file));
+    strncpy(retv->bd_base.snap_file, snap_file,
+                                sizeof(retv->bd_base.snap_file));
 
     if (S_ISREG((sta.st_mode))) {
         retv->bd_base.dirty_bitmap_len = ((sta.st_size / 512) + 7)/8;
@@ -581,11 +598,13 @@ open_dirty_bitmap(const char *filename)
     pthread_mutex_unlock(&backup_mutex);
 
     if (!dirty_bitmap_valid) {
-        memset(retv->bd_base.dirty_bitmap, 0xff, retv->bd_base.dirty_bitmap_len);
+        memset(retv->bd_base.dirty_bitmap, 0xff,
+                                            retv->bd_base.dirty_bitmap_len);
         retv->bd_base.bdinfo.dirty_blocks = retv->bd_base.bdinfo.max_blocks;
         return retv;
     }
-    read_in_dirty_bitmap(dirty_bitmap_file, &retv->bd_base.dirty_bitmap, retv->bd_base.dirty_bitmap_len);
+    read_in_dirty_bitmap(dirty_bitmap_file, &retv->bd_base.dirty_bitmap,
+                                            retv->bd_base.dirty_bitmap_len);
     return retv;
 }
 
@@ -611,33 +630,38 @@ close_dirty_bitmap(BlockDriverState *bs)
 
                 for (it = 0; it < bd->bd_base.bdinfo.max_blocks; it++) {
                     if (is_block_dirty(snbd->bd_base.dirty_bitmap, it)) {
-                        set_block_dirty(bd->bd_base.dirty_bitmap, it, &bd->bd_base.bdinfo.dirty_blocks);
+                        set_block_dirty(bd->bd_base.dirty_bitmap, it,
+                                        &bd->bd_base.bdinfo.dirty_blocks);
                     }
                 }
                 bd->bd_base.bdinfo.snapnumber--;
             }
         }
 
-        if ((dfd = open(bd->bd_base.dirty_bitmap_file, O_RDWR|O_CREAT|O_TRUNC, S_IRUSR|S_IWUSR)) >= 0) {
+        if ((dfd = open(bd->bd_base.dirty_bitmap_file, O_RDWR|O_CREAT|O_TRUNC,
+                                                    S_IRUSR|S_IWUSR)) >= 0) {
             int bw = bd->bd_base.dirty_bitmap_len;
             while (bw > 0) {
-                int bt = write(dfd, bd->bd_base.dirty_bitmap + (bd->bd_base.dirty_bitmap_len - bw), bw);
+                int bt = write(dfd, bd->bd_base.dirty_bitmap 
+                                    + (bd->bd_base.dirty_bitmap_len - bw), bw);
                 if (bt > 0) {
                     bw -= bt;
                 } else {
-                    fprintf(stderr, "Error rv %d errno %d while writing out dirty bitmap\n",
-		        bt, errno);
+                    fprintf(stderr,
+                        "Error rv %d errno %d while writing out dirty bitmap\n",
+                        bt, errno);
                     break;
                 }
-	    }
+            }
             close(dfd);
             /*
             fprintf(stderr, "Wrote a dirty_bitmap %s of len %d\n",
-	        bd->bd_base.dirty_bitmap_file, bd->bd_base.dirty_bitmap_len);
+                bd->bd_base.dirty_bitmap_file, bd->bd_base.dirty_bitmap_len);
              */
         } else {
-            fprintf(stderr, "Error %d opening %s while writing out dirty bitmap\n",
-                errno, bd->bd_base.dirty_bitmap_file);
+            fprintf(stderr,
+                    "Error %d opening %s while writing out dirty bitmap\n",
+                    errno, bd->bd_base.dirty_bitmap_file);
         }
 
         write_conf_file(bd->bd_base.conf_file, bd->bd_base.bdinfo.full_backup_mtime, bd->bd_base.bdinfo.snapnumber);
@@ -660,7 +684,8 @@ backup_get_vdisk_count(int fd)
 
     res.status = get_num_backup_disks();
 
-    if ((bw = write_bytes(fd, (unsigned char *) &res, sizeof(res))) != sizeof(res)) {
+    if ((bw = write_bytes(fd, (unsigned char *) &res, sizeof(res))) 
+                                    != sizeof(res)) {
         fprintf(stderr,
             "qemu.get_vdisk_count: error %d writing result\n",
             errno);
@@ -668,7 +693,7 @@ backup_get_vdisk_count(int fd)
     }
 
     if (res.status > 0) {
-	if (in_progress_snap != NULL) {
+        if (in_progress_snap != NULL) {
             livebackup_snap *itr = in_progress_snap->backup_disks;
             while (itr) {
                 bw = write_bytes(fd, (unsigned char *) &itr->bd_base.bdinfo,
@@ -681,7 +706,7 @@ backup_get_vdisk_count(int fd)
                 }
                 itr = itr->next;
             }
-	} else {
+        } else {
             livebackup_disk *itr = backup_disks;
             while (itr) {
                 bw = write_bytes(fd, (unsigned char *) &itr->bd_base.bdinfo,
@@ -694,7 +719,7 @@ backup_get_vdisk_count(int fd)
                 }
                 itr = itr->next;
             }
-	}
+        }
     }
     return 0;
 }
@@ -705,7 +730,8 @@ create_backup_disk_for_snap(livebackup_disk *in)
     livebackup_snap *out;
     out = qemu_mallocz(sizeof(*out));
     if (out == NULL) {
-        fprintf(stderr, "create_backup_disk_for_snap: alloc of backup_disk failed\n");
+        fprintf(stderr,
+                "create_backup_disk_for_snap: alloc of backup_disk failed\n");
         return NULL;
     }
     out->bd_base = in->bd_base;
@@ -780,7 +806,7 @@ backup_do_snap(int fd, backup_request *req)
         goto write_result_and_exit;
     }
     in_progress_snap->backup_tmp_buffer = qemu_memalign(512,
-                                              BACKUP_MAX_BLOCKS_IN_1_RESP * BACKUP_BLOCK_SIZE);
+                BACKUP_MAX_BLOCKS_IN_1_RESP * BACKUP_BLOCK_SIZE);
     if (in_progress_snap->backup_tmp_buffer == NULL) {
         res.status = B_DO_SNAP_RES_NOMEM;
         goto write_result_and_exit;
@@ -800,34 +826,38 @@ backup_do_snap(int fd, backup_request *req)
          */
         if (req->param1 == B_DO_SNAP_FULLBACKUP) {
             struct stat sta;
-	    int tfd;
+            int tfd;
 
-	    if ((tfd = open(itr->bd_base.bdinfo.name, O_WRONLY|O_NOCTTY|O_NONBLOCK|O_LARGEFILE, 0666)) >= 0) {
-		char tv[PATH_MAX];
-		sprintf(tv, "/proc/self/fd/%d", tfd);
-		utimes(tv, NULL);
-		close(tfd);
-	    } else {
-		fprintf(stderr,
-			"Error %d opening %s to set mtime for full backup\n",
-			errno, itr->bd_base.bdinfo.name);
-	    }
+            if ((tfd = open(itr->bd_base.bdinfo.name,
+                        O_WRONLY|O_NOCTTY|O_NONBLOCK|O_LARGEFILE, 0666)) >= 0) {
+                char tv[PATH_MAX];
+                sprintf(tv, "/proc/self/fd/%d", tfd);
+                utimes(tv, NULL);
+                close(tfd);
+            } else {
+                fprintf(stderr,
+                        "Error %d opening %s to set mtime for full backup\n",
+                        errno, itr->bd_base.bdinfo.name);
+            }
             if (stat(itr->bd_base.bdinfo.name, &sta) != 0) {
-                fprintf(stderr, "backup_do_snap: Error %d stat'ing base file %s\n",
+                fprintf(stderr,
+                        "backup_do_snap: Error %d stat'ing base file %s\n",
                         errno, itr->bd_base.bdinfo.name);
                 res.status = B_DO_SNAP_RES_NOMEM;
                 goto write_result_and_exit;
             }
             itr->bd_base.bdinfo.full_backup_mtime = sta.st_mtime;
             itr->bd_base.bdinfo.snapnumber = 0;
-            memset(itr->bd_base.dirty_bitmap, 0xff, itr->bd_base.dirty_bitmap_len);
+            memset(itr->bd_base.dirty_bitmap, 0xff,
+                    itr->bd_base.dirty_bitmap_len);
             itr->bd_base.bdinfo.dirty_blocks = itr->bd_base.bdinfo.max_blocks;
         }
 
         new_bd = create_backup_disk_for_snap(itr);
         new_dirty_bitmap = qemu_mallocz(itr->bd_base.dirty_bitmap_len);
         in_cow_bitmap = qemu_mallocz(itr->bd_base.dirty_bitmap_len);
-        if (new_bd == NULL || new_dirty_bitmap == NULL || in_cow_bitmap == NULL) {
+        if (new_bd == NULL || new_dirty_bitmap == NULL 
+                        || in_cow_bitmap == NULL) {
             res.status = B_DO_SNAP_RES_NOMEM;
             if (new_dirty_bitmap != NULL) qemu_free(new_dirty_bitmap);
             if (in_cow_bitmap != NULL) qemu_free(in_cow_bitmap);
@@ -837,12 +867,15 @@ backup_do_snap(int fd, backup_request *req)
         itr->bd_base.dirty_bitmap = new_dirty_bitmap;
         itr->bd_base.bdinfo.dirty_blocks = 0;
         itr->bd_base.bdinfo.snapnumber++;
-        write_conf_file(itr->bd_base.conf_file, itr->bd_base.bdinfo.full_backup_mtime, itr->bd_base.bdinfo.snapnumber);
+        write_conf_file(itr->bd_base.conf_file,
+                    itr->bd_base.bdinfo.full_backup_mtime,
+                    itr->bd_base.bdinfo.snapnumber);
 
         new_bd->in_cow_bitmap = in_cow_bitmap;
         new_bd->in_cow_bitmap_count = 0;
 
-        if (bdrv_file_open(&new_bd->backup_base_bs, new_bd->bd_base.bdinfo.name, 0/* read only */)) {
+        if (bdrv_file_open(&new_bd->backup_base_bs,
+                         new_bd->bd_base.bdinfo.name, 0/* read only */)) {
             fprintf(stderr, "backup_do_snap: Error opening base file %s\n",
                         new_bd->bd_base.bdinfo.name);
             res.status = B_DO_SNAP_RES_NOMEM;
@@ -851,24 +884,30 @@ backup_do_snap(int fd, backup_request *req)
         if (in_progress_snap->backup_snap_drv == NULL) {
             in_progress_snap->backup_snap_drv = bdrv_find_format("qcow2");
             if (in_progress_snap->backup_snap_drv == NULL) {
-                fprintf(stderr, "backup_do_snap: Error. Could not find qcow2 driver\n");
+                fprintf(stderr,
+                    "backup_do_snap: Error. Could not find qcow2 driver\n");
                 res.status = B_DO_SNAP_RES_NOMEM;
                 goto write_result_and_exit;
             }
         }
         if (in_progress_snap->backup_snap_drv) {
             QEMUOptionParameter *options;
-            options = parse_option_parameters("", in_progress_snap->backup_snap_drv->create_options, NULL);
-            set_option_parameter_int(options, BLOCK_OPT_SIZE, itr->bd_base.bdinfo.max_blocks);
+            options = parse_option_parameters("",
+                    in_progress_snap->backup_snap_drv->create_options, NULL);
+            set_option_parameter_int(options, BLOCK_OPT_SIZE,
+                    itr->bd_base.bdinfo.max_blocks);
             if (bdrv_create(in_progress_snap->backup_snap_drv,
                         itr->bd_base.snap_file, options)) {
-                fprintf(stderr, "backup_do_snap: Error creating snap cow file %s\n",
+                fprintf(stderr,
+                    "backup_do_snap: Error creating snap cow file %s\n",
                     itr->bd_base.snap_file);
                 res.status = B_DO_SNAP_RES_NOMEM;
                 goto write_result_and_exit;
             } else {
-                if (bdrv_file_open(&new_bd->backup_cow_bs, itr->bd_base.snap_file, BDRV_O_RDWR)) {
-                    fprintf(stderr, "backup_do_snap: Error opening snap cow file %s\n",
+                if (bdrv_file_open(&new_bd->backup_cow_bs,
+                            itr->bd_base.snap_file, BDRV_O_RDWR)) {
+                    fprintf(stderr,
+                        "backup_do_snap: Error opening snap cow file %s\n",
                         itr->bd_base.snap_file);
                     res.status = B_DO_SNAP_RES_NOMEM;
                     goto write_result_and_exit;
@@ -928,27 +967,33 @@ backup_get_blocks(int fd, backup_request *req)
         res.status = B_GET_BLOCKS_ERROR_INVALID_DISK;
         goto write_result_and_exit;
     }
-    if (get_next_dirty_block_offset(bd->bd_base.dirty_bitmap, bd->bd_base.bdinfo.max_blocks,
-		 req->param2, BACKUP_MAX_BLOCKS_IN_1_RESP, &off, &num) < 0) {
+    if (get_next_dirty_block_offset(bd->bd_base.dirty_bitmap,
+                bd->bd_base.bdinfo.max_blocks,
+                req->param2, BACKUP_MAX_BLOCKS_IN_1_RESP, &off, &num) < 0) {
         res.status = B_GET_BLOCKS_NO_MORE_BLOCKS;
         goto write_result_and_exit;
     }
-    /* read these blocks, from the COW file if it is in the COW file, or from the base file */
+    /*
+     * read these blocks, from the COW file if it is in the COW file,
+     * or from the base file
+     */
     for (bitr = 0; bitr < num; bitr++) {
         if (is_block_dirty(bd->in_cow_bitmap, off + bitr)) {
             if (bdrv_read(bd->backup_cow_bs, off + bitr,
-                          in_progress_snap->backup_tmp_buffer + (bitr * BACKUP_BLOCK_SIZE),
-                          1) != 0) {
-                fprintf(stderr, "backup_get_blocks: Error reading COW offset %ld\n",
+                          in_progress_snap->backup_tmp_buffer
+                          + (bitr * BACKUP_BLOCK_SIZE), 1) != 0) {
+                fprintf(stderr,
+                    "backup_get_blocks: Error reading COW offset %ld\n",
                         off + bitr);
                 res.status = B_GET_BLOCKS_ERROR_IOREAD;
                 goto write_result_and_exit;
             }
         } else {
             if (bdrv_read(bd->backup_base_bs, off + bitr,
-                          in_progress_snap->backup_tmp_buffer + (bitr * BACKUP_BLOCK_SIZE),
-                          1) != 0) {
-                fprintf(stderr, "backup_get_blocks: Error reading base offset %ld\n",
+                          in_progress_snap->backup_tmp_buffer
+                          + (bitr * BACKUP_BLOCK_SIZE), 1) != 0) {
+                fprintf(stderr,
+                        "backup_get_blocks: Error reading base offset %ld\n",
                         off + bitr);
                 res.status = B_GET_BLOCKS_ERROR_IOREAD;
                 goto write_result_and_exit;
@@ -968,9 +1013,10 @@ write_result_and_exit:
         return -1;
     } else {
         if (write_data) {
-            if (write_bytes(fd, in_progress_snap->backup_tmp_buffer, num * BACKUP_BLOCK_SIZE) !=
-                                                   num * BACKUP_BLOCK_SIZE) {
-                fprintf(stderr, "backup_get_blocks: Error %d writing res data\n", errno);
+            if (write_bytes(fd, in_progress_snap->backup_tmp_buffer,
+                        num * BACKUP_BLOCK_SIZE) != num * BACKUP_BLOCK_SIZE) {
+                fprintf(stderr,
+                    "backup_get_blocks: Error %d writing res data\n", errno);
                 return -1;
             }
         }
@@ -1045,22 +1091,22 @@ do_backup(int fd)
                 if (backup_get_vdisk_count(fd) < 0) {
                     return -1;
                 }
-	        break;
+                break;
             case B_DO_SNAP:
                 if (backup_do_snap(fd, &req) < 0) {
                     return -1;
                 }
-	        break;
+                break;
             case B_GET_BLOCKS:
                 if (backup_get_blocks(fd, &req) < 0) {
                     return -1;
                 }
-	        break;
+                break;
             case B_DESTROY_SNAP:
                 if (backup_destroy_snap(fd, &req) < 0) {
                     return -1;
                 }
-	        break;
+                break;
             default:
                 break;
             }
@@ -1088,10 +1134,10 @@ backup_thread(void *unused)
     pthread_sigmask(SIG_BLOCK, &set, NULL);
 
     if (livebackup_port != NULL) {
-	lport = atoi(livebackup_port);
+        lport = atoi(livebackup_port);
     } else {
-	fprintf(stderr, "Backup port not specified. LiveBackup disabled\n");
-	return NULL;
+        fprintf(stderr, "Backup port not specified. LiveBackup disabled\n");
+        return NULL;
     }
 
     while (1) {
@@ -1106,17 +1152,20 @@ backup_thread(void *unused)
         addr.sin_family = AF_INET;
         addr.sin_port = htons(lport);
         in = (struct in_addr *) &addr.sin_addr.s_addr;
-	in->s_addr = 0L;
+        in->s_addr = 0L;
 
         listen_socket = socket(PF_INET, SOCK_STREAM, 0);
         if (listen_socket < 0) {
-            fprintf(stderr, "qemu.backup_thread: Error %d opening listen socket\n", errno);
+            fprintf(stderr,
+                "qemu.backup_thread: Error %d opening listen socket\n", errno);
             goto error;
         }
 
         opt = 1;
-        if (setsockopt(listen_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
-            fprintf(stderr, "qemu.backup_thread: Error %d setting reuseaddr\n", errno);
+        if (setsockopt(listen_socket, SOL_SOCKET, SO_REUSEADDR,
+                    &opt, sizeof(opt)) == -1) {
+            fprintf(stderr,
+                "qemu.backup_thread: Error %d setting reuseaddr\n", errno);
             goto error;
         }
 
@@ -1139,7 +1188,7 @@ backup_thread(void *unused)
 
         if (fd >= 0) close(fd);
 error:
-	if (listen_socket != -1) {
+        if (listen_socket != -1) {
             close(listen_socket);
             listen_socket = -1;
         }
