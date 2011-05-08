@@ -24,6 +24,8 @@
 #include <dirent.h>
 #include <netdb.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
 
 #include "block.h"
 #include "block_int.h"

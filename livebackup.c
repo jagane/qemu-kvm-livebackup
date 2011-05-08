@@ -22,7 +22,8 @@ static pthread_cond_t backup_cond = PTHREAD_COND_INITIALIZER;
 static int waiting_for_aio_writes_to_be_done = 0;
 static snapshot *in_progress_snap = NULL;
 
-char *backup_port;
+char *livebackup_port;
+char *livebackup_dir;
 
 static void
 remove_from_interposer_list(aiowr_interposer *ac)
@@ -378,6 +379,64 @@ read_in_dirty_bitmap(char *filename, unsigned char **dbmp, int dbmp_len)
     }
 }
 
+//-----------------------------------------------------------------------------
+// MurmurHashNeutral2, by Austin Appleby
+
+// Same as MurmurHash2, but endian- and alignment-neutral.
+// Half the speed though, alas.
+
+static unsigned int
+MurmurHashNeutral2 ( const void * key, int len, unsigned int seed )
+{
+    const unsigned int m = 0x5bd1e995;
+    const int r = 24;
+
+    unsigned int h = seed ^ len;
+
+    const unsigned char * data = (const unsigned char *)key;
+
+    while(len >= 4)
+    {
+        unsigned int k;
+
+        k  = data[0];
+        k |= data[1] << 8;
+        k |= data[2] << 16;
+        k |= data[3] << 24;
+
+        k *= m; 
+        k ^= k >> r; 
+        k *= m;
+
+        h *= m;
+        h ^= k;
+
+        data += 4;
+        len -= 4;
+    }
+	
+    switch(len)
+    {
+    case 3: h ^= data[2] << 16;
+    case 2: h ^= data[1] << 8;
+    case 1: h ^= data[0];
+	        h *= m;
+    };
+
+    h ^= h >> 13;
+    h *= m;
+    h ^= h >> 15;
+
+    return h;
+} 
+
+static void
+create_hashfilename(const char *vdisk_file, char *hashfn, int hashfnlen)
+{
+    unsigned int hv = MurmurHashNeutral2(vdisk_file, strlen(vdisk_file), 0);
+    snprintf(hashfn, hashfnlen, "%.16x", hv);
+}
+
 /*
  * If the virtual disk file filename has a config file called
  * filename.livebackupconf present in the same directory, then this
@@ -397,6 +456,7 @@ livebackup_disk *
 open_dirty_bitmap(const char *filename)
 {
     char dirty_bitmap_file[PATH_MAX];
+    char hfn[16];
     char conf_file[PATH_MAX];
     char snap_file[PATH_MAX];
     struct stat sta, stb;
@@ -405,8 +465,17 @@ open_dirty_bitmap(const char *filename)
     int dirty_bitmap_valid = 0;
     livebackup_disk *retv;
 
+    if (!livebackup_dir) {
+        /* We need a livebackup_dir to store snap and COW files */
+        return NULL;
+    }
+    create_hashfilename(filename, hfn, sizeof(hfn));
+    snprintf(conf_file, sizeof(conf_file), "%s/%s.conf", livebackup_dir, hfn);
+    snprintf(dirty_bitmap_file, sizeof(dirty_bitmap_file),
+                "%s/%s.dirty_bitmap", livebackup_dir, hfn);
+    snprintf(snap_file, sizeof(snap_file),
+                "%s/%s.qcow2", livebackup_dir, hfn);
 
-    sprintf(conf_file, "%s.livebackupconf", filename);
     if (stat(filename, &sta) != 0) {
         /* filename does not exist? */
         return NULL;
@@ -450,10 +519,6 @@ open_dirty_bitmap(const char *filename)
             write_conf_file(conf_file, full_backup_mtime, snap);
         }
     }
-    snprintf(dirty_bitmap_file, sizeof(dirty_bitmap_file),
-                "%s.dirty_bitmap", filename);
-    snprintf(snap_file, sizeof(snap_file),
-                "%s.snap.qcow", filename);
 
     retv = qemu_mallocz(sizeof(livebackup_disk));
     if (!retv) {
@@ -468,8 +533,35 @@ open_dirty_bitmap(const char *filename)
     strncpy(retv->bd_base.dirty_bitmap_file, dirty_bitmap_file, sizeof(retv->bd_base.dirty_bitmap_file));
     strncpy(retv->bd_base.snap_file, snap_file, sizeof(retv->bd_base.snap_file));
 
-    retv->bd_base.dirty_bitmap_len = ((sta.st_size / 512) + 7)/8;
-    retv->bd_base.bdinfo.max_blocks = sta.st_size/512;
+    if (S_ISREG((sta.st_mode))) {
+        retv->bd_base.dirty_bitmap_len = ((sta.st_size / 512) + 7)/8;
+        retv->bd_base.bdinfo.max_blocks = sta.st_size/512;
+    } else if (S_ISBLK((sta.st_mode))) {
+        unsigned long sz;
+        int fd = open(filename, O_LARGEFILE, O_RDONLY);
+        if (fd < 0) {
+            fprintf(stderr, "open_dirty_bitmap: error opening block device %s"
+                             " to determine size\n", filename);
+            qemu_free(retv);
+            return NULL;
+        }
+        if (!ioctl(fd, BLKGETSIZE64, &sz)) {
+            retv->bd_base.dirty_bitmap_len = ((sz / 512) + 7)/8;
+            retv->bd_base.bdinfo.max_blocks = sz/512;
+            close(fd);
+        } else {
+            fprintf(stderr, "open_dirty_bitmap: error determining size of"
+                             " block device %s\n", filename);
+            qemu_free(retv);
+            close(fd);
+            return NULL;
+        }
+    } else {
+        fprintf(stderr, "open_dirty_bitmap: error. %s is neither a "
+                        "regular file, nor a block device\n", filename);
+        qemu_free(retv);
+        return NULL;
+    }
     retv->next = NULL;
 
     retv->bd_base.dirty_bitmap = qemu_mallocz(retv->bd_base.dirty_bitmap_len);
@@ -995,8 +1087,8 @@ backup_thread(void *unused)
     sigfillset(&set);
     pthread_sigmask(SIG_BLOCK, &set, NULL);
 
-    if (backup_port != NULL) {
-	lport = atoi(backup_port);
+    if (livebackup_port != NULL) {
+	lport = atoi(livebackup_port);
     } else {
 	fprintf(stderr, "Backup port not specified. LiveBackup disabled\n");
 	return NULL;
