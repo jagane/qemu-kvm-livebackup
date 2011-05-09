@@ -915,6 +915,26 @@ backup_do_snap(int fd, backup_request *req)
             }
         }
 
+        if (0) { /* Test livebackup by creating a lvm snapshot and comparing */
+            char snapname[PATH_MAX];
+            char cmd[1024];
+            int rv = 0;
+            char *lst;
+            
+            if ((lst = strrchr(new_bd->bd_base.bdinfo.name, '/')) != NULL) {
+                snprintf(snapname, sizeof(snapname), "%s_backup", lst + 1);
+            } else {
+                snprintf(snapname, sizeof(snapname), "%s_backup",
+                         new_bd->bd_base.bdinfo.name);
+            }
+            snprintf(cmd, sizeof(cmd), "/sbin/lvcreate -L1G -s -n %s %s",
+                        snapname, new_bd->bd_base.bdinfo.name);
+            rv = system(cmd);
+            if (rv != 0) {
+                fprintf(stderr, "Error %d exec'ing %s during do_snap\n",
+                    rv, cmd);
+            }
+        }
         append_to_snap_list(&in_progress_snap->backup_disks, new_bd);
         itr = itr->next;
     }
