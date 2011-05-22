@@ -1610,6 +1610,9 @@ int bdrv_flush(BlockDriverState *bs)
         return bs->drv->bdrv_flush(bs);
     }
 
+    if (bs->livebackup_disk)
+        livebackup_flush(bs);
+
     /*
      * Some block drivers always operate in either writethrough or unsafe mode
      * and don't support bdrv_flush therefore. Usually qemu doesn't know how

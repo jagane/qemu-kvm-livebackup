@@ -33,10 +33,10 @@
 /*********************** Begin Protocol Definition ****************************/
 typedef struct _backup_request {
     int64_t	opcode;
-#define B_NOOP			0
-#define B_GET_VDISK_COUNT	1
-#define B_DO_SNAP		2
-#define B_GET_BLOCKS		3
+#define B_NOOP              0
+#define B_GET_VDISK_COUNT   1
+#define B_DO_SNAP           2
+#define B_GET_CLUSTERS		3
 #define B_DESTROY_SNAP		4
     int64_t	param1;
 #define B_DO_SNAP_INCRBACKUP	0
@@ -50,8 +50,8 @@ typedef struct _get_vdisk_count_result {
 
 typedef struct _backup_disk_info {
     char        name[PATH_MAX];
-    int64_t	max_blocks;
-    int64_t     dirty_blocks;
+    int64_t     max_clusters;
+    int64_t     dirty_clusters;
     int64_t     full_backup_mtime;
     int64_t     snapnumber;
 } backup_disk_info;
@@ -64,20 +64,22 @@ typedef struct _do_snap_result {
 #define B_DO_SNAP_RES_PENDING_WRITES        -3
 } do_snap_result;
 
-typedef struct _get_blocks_result {
+typedef struct _get_clusters_result {
     int64_t             status;
-#define B_GET_BLOCKS_SUCCESS                 0
-#define B_GET_BLOCKS_NO_MORE_BLOCKS          1
-#define B_GET_BLOCKS_ERROR_UNKNOWN          -1
-#define B_GET_BLOCKS_ERROR_NO_SNAP_AVAIL    -2
-#define B_GET_BLOCKS_ERROR_INVALID_DISK     -3
-#define B_GET_BLOCKS_ERROR_IOREAD           -4
-#define B_GET_BLOCKS_ERROR_BASE_FILE        -5
+#define B_GET_CLUSTERS_SUCCESS                 0
+#define B_GET_CLUSTERS_NO_MORE_CLUSTERS        1
+#define B_GET_CLUSTERS_ERROR_UNKNOWN          -1
+#define B_GET_CLUSTERS_ERROR_NO_SNAP_AVAIL    -2
+#define B_GET_CLUSTERS_ERROR_INVALID_DISK     -3
+#define B_GET_CLUSTERS_ERROR_IOREAD           -4
+#define B_GET_CLUSTERS_ERROR_BASE_FILE        -5
     int64_t             offset;
-    int64_t             blocks;
-} get_blocks_result;
-#define BACKUP_MAX_BLOCKS_IN_1_RESP          32
+    int64_t             clusters;
+} get_clusters_result;
+#define BACKUP_MAX_CLUSTERS_IN_1_RESP       4
 #define BACKUP_BLOCK_SIZE                    512
+#define BACKUP_CLUSTER_SIZE                 4096
+#define BACKUP_BLOCKS_PER_CLUSTER           (BACKUP_CLUSTER_SIZE/BACKUP_BLOCK_SIZE)
 
 typedef struct _destroy_snap_result {
     int64_t		status;
@@ -88,17 +90,15 @@ typedef struct _destroy_snap_result {
 /************************* End Protocol Definition ****************************/
 
 static unsigned char mp[8] = { 128, 64, 32, 16, 8, 4, 2, 1};
-static unsigned char mpo[8] = { 127, 191, 223, 239, 247, 251, 253, 254};
+// static unsigned char mpo[8] = { 127, 191, 223, 239, 247, 251, 253, 254};
 
-static inline void set_block_dirty(unsigned char *bitmap, int64_t sector_num,
+static inline void set_cluster_dirty(unsigned char *bitmap, int64_t cluster_num,
                     int64_t *count_ptr)
 {
-    int64_t off = sector_num/8;
-    int64_t bitoff = sector_num%8;
+    int64_t off = cluster_num/8;
+    int64_t bitoff = cluster_num%8;
     uint8_t ch = *(bitmap + off);
-    if (ch & mpo[bitoff]) {
-        *(bitmap + off) = ch | mp[bitoff];
-    } else {
+    if ((ch & mp[bitoff]) == 0) {
         *(bitmap + off) = ch | mp[bitoff];
         *count_ptr = (*count_ptr) + 1;
     }
@@ -107,47 +107,60 @@ static inline void set_block_dirty(unsigned char *bitmap, int64_t sector_num,
 static inline void set_blocks_dirty(unsigned char *bitmap,
                     int64_t sector_num, int nb_sectors,
                     int64_t *count_ptr) {
-    int i;
-    for (i = 0; i < nb_sectors; i++) {
-        set_block_dirty(bitmap, sector_num + i, count_ptr);
+    int64_t first_cluster;
+    int64_t last_cluster;
+    int64_t i;
+
+    first_cluster = sector_num / BACKUP_BLOCKS_PER_CLUSTER;
+    last_cluster = (sector_num + nb_sectors + BACKUP_BLOCKS_PER_CLUSTER -1)
+                    / BACKUP_BLOCKS_PER_CLUSTER;
+    for (i = first_cluster; i < last_cluster; i++) {
+        set_cluster_dirty(bitmap, i, count_ptr);
+    }
+}
+
+static inline int
+is_cluster_dirty(unsigned char *dirty_bitmap, int64_t cluster)
+{
+    unsigned char ch = *(dirty_bitmap + (cluster/8));
+    unsigned char ch1 = ch & mp[cluster%8];
+    if (ch1 != 0) {
+        return 1;
+    } else {
+        return 0;
     }
 }
 
 static inline int
 is_block_dirty(unsigned char *dirty_bitmap, int64_t block)
 {
-    unsigned char ch = *(dirty_bitmap + (block/8));
-    unsigned char ch1 = ch & mp[block%8];
-    if (ch1 != 0) {
-	return 1;
-    } else {
-        return 0;
-    }
+    int64_t cluster = block/BACKUP_BLOCKS_PER_CLUSTER;
+    return is_cluster_dirty(dirty_bitmap, cluster);
 }
 
 /*
- * return offset >= 0 of next available dirty block
- * return < 0 if there are no more dirty blocks
+ * return 0 with ret_cluster set to next available dirty cluster
+ * return < 0 if there are no more dirty clusters
  */
 static inline int
-get_next_dirty_block_offset(unsigned char *dirty_bitmap,
-        int64_t max_blocks_in_dirty_bitmap,
-        int64_t curblock, int maxblocks,
-        int64_t *ret_block, int *ret_dirty_blocks)
+get_next_dirty_cluster_offset(unsigned char *dirty_bitmap,
+        int64_t max_clusters_in_dirty_bitmap,
+        int64_t curcluster, int maxclusters,
+        int64_t *ret_cluster, int *ret_dirty_clusters)
 {
-    while (curblock < max_blocks_in_dirty_bitmap) {
-        if (is_block_dirty(dirty_bitmap, curblock)) {
+    while (curcluster < max_clusters_in_dirty_bitmap) {
+        if (is_cluster_dirty(dirty_bitmap, curcluster)) {
             int i;
-            for (i = 1; i < maxblocks; i++) {
-                if (!is_block_dirty(dirty_bitmap, curblock + i)) {
+            for (i = 1; i < maxclusters; i++) {
+                if (!is_cluster_dirty(dirty_bitmap, curcluster + i)) {
                     break;
                 }
             }
-            *ret_block = curblock;
-            *ret_dirty_blocks = i;
+            *ret_cluster = curcluster;
+            *ret_dirty_clusters = i;
             return 0;
         }
-        curblock++;
+        curcluster++;
     }
     return -1;
 }
@@ -245,7 +258,10 @@ write_conf_file(char *cfil, int64_t gen, int64_t snap)
     }
 }
 
-
+/*
+ * backup_disk_base stores information that is common
+ * to livebackup_snap and livebackup_disk.
+ */
 typedef struct _backup_disk_base {
     backup_disk_info bdinfo;
     char        conf_file[PATH_MAX];
@@ -255,6 +271,10 @@ typedef struct _backup_disk_base {
     unsigned char *dirty_bitmap;
 } backup_disk_base;
 
+/*
+ * livebackup_snap stores the state of a single virtual drive in
+ * the snapshot structure.
+ */
 typedef struct _livebackup_snap {
     backup_disk_base bd_base;
     BlockDriverState *backup_base_bs;
@@ -264,43 +284,62 @@ typedef struct _livebackup_snap {
     struct _livebackup_snap *next;
 } livebackup_snap;
 
+/*
+ * livebackup_disk stores the state of a single virtual drive in
+ * during normal operation of the VM
+ */
 typedef struct _livebackup_disk {
     backup_disk_base bd_base;
-    livebackup_snap *snap_backup_disk;
+    livebackup_snap *snap_backup_disk; /* points to the snap, if snap active */
     struct _livebackup_disk *next;
 } livebackup_disk;
 
+/*
+ * At any given time, there can be a single snapshot
+ * called in_progress_snap in the system.
+ */
 typedef struct _snapshot {
-    livebackup_snap *backup_disks;
-    BlockDriver *backup_snap_drv;
-    unsigned char *backup_tmp_buffer;
+    livebackup_snap *backup_disks; /* List of virtual drives in livebackup */
+    BlockDriver *backup_snap_drv; /* driver used for livebackup COW (qcow2) */
+    unsigned char *backup_tmp_buffer;   /* used for sync I/O copy cow and */
+                                        /* reading in blocks to write to */
+                                        /* the client over the socket */
+    int destroy;
 } snapshot;
+
+typedef struct _aiowr_interposer_cluster {
+    int64_t first_cluster;
+    int64_t last_cluster;
+    uint8_t *cow_tmp_buffer;
+    QEMUIOVector *cow_tmp_qiov;
+    int ret;
+    int state;
+#define AIOWR_CLUSTER_COWRD 1
+#define AIOWR_CLUSTER_COWWR 2
+#define AIOWR_CLUSTER_DONE 3
+    struct _aiowr_interposer_cluster *next;
+    struct _aiowr_interposer *up;
+} aiowr_interposer_cluster;
 
 typedef struct _aiowr_interposer {
     /* bs of original write that we intercepted */
     BlockDriverState *bs;
 
-    unsigned int state;
-#define AIOWR_INTERPOSER_COW_READ	1
-#define AIOWR_INTERPOSER_COW_WRITE	2
-#define AIOWR_INTERPOSER_ACTUAL_WRITE	3
-    /* Params to the original bdrv_aio_write */
+    /* Params to the original bdrv_aio_write that we intercepted */
     BlockDriverCompletionFunc *cb;
     void *opaque;
     int64_t sector_num;
     int nb_sectors;
     QEMUIOVector *qiov;
 
-    /* members used for the COW read and write */
-    uint8_t *cow_tmp_buffer;
-    QEMUIOVector *cow_tmp_qiov;
+    /* cluster that we are COWing */
+    aiowr_interposer_cluster *clusters;
 
     struct _aiowr_interposer *next;
 } aiowr_interposer;
 
 livebackup_disk *open_dirty_bitmap(const char *filename);
 void close_dirty_bitmap(BlockDriverState *bs);
-void aiowrite_cb_interposer(void *opaque, int ret);
 void set_dirty(BlockDriverState *bs, int64_t sector_num,
                                  int nb_sectors);
 BlockDriverAIOCB *livebackup_interposer(BlockDriverState *bs,
@@ -308,5 +347,6 @@ BlockDriverAIOCB *livebackup_interposer(BlockDriverState *bs,
                                  QEMUIOVector *qiov, int nb_sectors,
                                  BlockDriverCompletionFunc *cb, void *opaque);
 int start_backup_listener(void);
+void livebackup_flush(BlockDriverState *bs);
 
 #endif /* _LIVEBACKUP_H_ */

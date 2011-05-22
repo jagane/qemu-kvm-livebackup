@@ -36,7 +36,7 @@ remove_from_interposer_list(aiowr_interposer *ac)
             if (prev)
                 prev->next = cur->next;
             else
-                aiowr_interposers = NULL;
+                aiowr_interposers = cur->next;
             break;
         }
         prev = cur;
@@ -44,17 +44,98 @@ remove_from_interposer_list(aiowr_interposer *ac)
     }
 }
 
-void
-aiowrite_cb_interposer(void *opaque, int ret)
+/*
+ * Checks if any of the entries in the
+ * aiowr_interposer list have a COW
+ * read or write pending. If so, return
+ * 1, otherwise return 0
+ */
+static int
+check_interposer_list_for_cow(void)
+{
+    aiowr_interposer *cur = aiowr_interposers;
+    while (cur) {
+        if (cur->clusters) {
+            return 1;
+        }
+        cur = cur->next;
+    }
+    return 0;
+}
+
+/*
+ * must be called while holding the backup_mutex
+ */
+static void
+actually_destroy_snap(void)
+{
+    livebackup_snap *itr;
+    livebackup_disk *bitr;
+
+    if (!in_progress_snap) {
+        return;
+    }
+
+    if (in_progress_snap->backup_tmp_buffer)
+        qemu_free(in_progress_snap->backup_tmp_buffer);
+
+    /* walk the list of backup_disks in this snapshot and clean them out */
+    itr = in_progress_snap->backup_disks;
+    while (itr != NULL) {
+        livebackup_snap *save;
+        qemu_free(itr->bd_base.dirty_bitmap);
+        qemu_free(itr->in_cow_bitmap);
+        if (itr->backup_base_bs) bdrv_close(itr->backup_base_bs);
+        if (itr->backup_cow_bs) bdrv_close(itr->backup_cow_bs);
+        unlink(itr->bd_base.snap_file);
+        save = itr;
+        itr = itr->next;
+        qemu_free(save);
+    }
+
+    /* in the list of this VM's backup_disks, NULL out the ptr to the snap */
+    bitr = backup_disks;
+    while (bitr != NULL) {
+        bitr->snap_backup_disk = NULL;
+        bitr = bitr->next;
+    }
+
+    qemu_free(in_progress_snap);
+    in_progress_snap = NULL;
+}
+
+static void
+free_aiowr_interposer_cluster(aiowr_interposer *ac)
+{
+    if (ac->clusters) {
+        aiowr_interposer_cluster *to_free = ac->clusters;
+        aiowr_interposer_cluster *save = NULL;
+        while (to_free) {
+            save = to_free->next;
+            if (to_free->cow_tmp_buffer) {
+                qemu_free(to_free->cow_tmp_buffer);
+            }
+            if (to_free->cow_tmp_qiov) {
+                qemu_iovec_destroy(to_free->cow_tmp_qiov);
+                qemu_free(to_free->cow_tmp_qiov);
+            }
+            qemu_free(to_free);
+            to_free = save;
+        }
+        ac->clusters = NULL;
+    }
+}
+
+static void
+aiowrite_cb_interposer_realwr(void *opaque, int ret)
 {
     aiowr_interposer *ac = (aiowr_interposer *)opaque;
     BlockDriverCompletionFunc *saved_cb;
     void *saved_opaque;
     BlockDriverState *bs;
     livebackup_disk *bd;
-    livebackup_snap *snap_bd;
-    int call_cb = 0;
 
+    /* Actual write completed. */
     pthread_mutex_lock(&backup_mutex);
 
     saved_cb = ac->cb;
@@ -63,79 +144,26 @@ aiowrite_cb_interposer(void *opaque, int ret)
     bs = ac->bs;
     bd = bs->livebackup_disk;
     if (!bd) {
-        fprintf(stderr, "aiowrite_cb_interposer: Error. bd null\n");
+        fprintf(stderr, "aiowrite_cb_interposer_realwr: Error. bd null\n");
         ret = -1;
-        call_cb = 1;
-        goto unlock_and_exit;
     }
-    snap_bd = bd->snap_backup_disk;
 
-    if (ac->state == AIOWR_INTERPOSER_COW_READ) {
-        /* COW read completed. Initiate COW write */
-        if (!in_progress_snap) {
-            /*
-             * The snapshot was removed before this COW read completed
-             * Just redirect to the actual write
-             */
-            remove_from_interposer_list(ac);
-            free(ac);
-            call_cb = 1;
-            goto unlock_and_exit;
-        }
-        if (ret == 0) {
-            ac->state = AIOWR_INTERPOSER_COW_WRITE;
-            bdrv_aio_writev(snap_bd->backup_cow_bs,
-                           ac->sector_num, ac->cow_tmp_qiov, ac->nb_sectors,
-                           aiowrite_cb_interposer, ac);
-            call_cb = 0;
-        } else {
-            fprintf(stderr, "Error in COW read of %d sectors @ %ld\n",
-                ac->nb_sectors, ac->sector_num);
-            if (ac->cow_tmp_buffer) qemu_free(ac->cow_tmp_buffer);
-            remove_from_interposer_list(ac);
-            free(ac);
-            call_cb = 1;
-        }
-    } else if(ac->state == AIOWR_INTERPOSER_COW_WRITE) {
-        /* COW write completed. Initiate actual write */
-        if (!in_progress_snap) {
-            /*
-             * The snapshot was removed before this COW write completed
-             * Just redirect to the actual write
-             */
-            remove_from_interposer_list(ac);
-            free(ac);
-            call_cb = 1;
-            goto unlock_and_exit;
-        }
-        if (ret == 0) {
-            /* Set this block's bit in the in_cow_bitmap */
-            set_blocks_dirty(snap_bd->in_cow_bitmap, ac->sector_num,
-                            ac->nb_sectors, &snap_bd->in_cow_bitmap_count);
+    free_aiowr_interposer_cluster(ac);
+    remove_from_interposer_list(ac);
+    free(ac);
 
-            ac->state = AIOWR_INTERPOSER_ACTUAL_WRITE;
-            qemu_free(ac->cow_tmp_buffer);
-            ac->cow_tmp_buffer = NULL;
-            bs->drv->bdrv_aio_writev(bs, ac->sector_num, ac->qiov,
-                                ac->nb_sectors, aiowrite_cb_interposer, ac);
-            call_cb = 0;
-        } else {
-            fprintf(stderr, "Error in COW write of %d sectors @ %ld\n",
-                ac->nb_sectors, ac->sector_num);
-            if (ac->cow_tmp_buffer) qemu_free(ac->cow_tmp_buffer);
-            remove_from_interposer_list(ac);
-            free(ac);
-            call_cb = 1;
+    /*
+     * If in_progress_snap->destroy is set, then
+     * check all the items in our interposer list
+     * If we have no pending COW reads or writes,
+     * then destroy the snap
+     */
+    if (in_progress_snap && in_progress_snap->destroy) {
+        if (!check_interposer_list_for_cow()) {
+            actually_destroy_snap();
         }
-    } else {
-        /* Actual write completed. */
-        /* Remove async req from our interposer list */
-        remove_from_interposer_list(ac);
-        free(ac);
-    
-        call_cb = 1;
     }
-unlock_and_exit:
+
     /*
      * If our interposer list is empty, and we have a
      * snap request waiting, signal that thread.
@@ -146,42 +174,271 @@ unlock_and_exit:
         }
     }
     pthread_mutex_unlock(&backup_mutex);
-    if (call_cb) {
-        saved_cb(saved_opaque, ret);
+    saved_cb(saved_opaque, ret);
+}
+
+static void
+aiowrite_cb_interposer_cow(void *opaque, int ret)
+{
+    aiowr_interposer_cluster *ac_cl = (aiowr_interposer_cluster *)opaque;
+    aiowr_interposer *ac = NULL;
+    aiowr_interposer_cluster *ac_cl_iter = NULL;
+    BlockDriverState *bs = NULL;
+    livebackup_disk *bd = NULL;
+    livebackup_snap *snap_bd = NULL;
+
+    pthread_mutex_lock(&backup_mutex);
+
+    /* get a bunch of backpointers with careful validity checking */
+    ac = ac_cl->up; /* backpointer from cluster to interposer state */
+    bs = ac->bs;
+    bd = bs->livebackup_disk; /* backptr from interposer to livebackup_disk */
+    if (!bd) {
+        fprintf(stderr, "aiowrite_cb_interposer_cow: Error. bd null\n");
+        goto unlock_and_exit;
+    }
+    snap_bd = bd->snap_backup_disk; /* backptr from livebackup_disk to snap */
+
+    ac_cl->ret = ret;
+    if (ac_cl->state == AIOWR_CLUSTER_COWRD) {
+        if (ret == 0) {
+            ac_cl->state = AIOWR_CLUSTER_COWWR;
+            bdrv_aio_writev(snap_bd->backup_cow_bs,
+                ac_cl->first_cluster * BACKUP_BLOCKS_PER_CLUSTER,
+                ac_cl->cow_tmp_qiov,
+                (ac_cl->last_cluster-ac_cl->first_cluster)
+                            * BACKUP_BLOCKS_PER_CLUSTER,
+                aiowrite_cb_interposer_cow, ac_cl);
+        } else {
+            ac_cl->state = AIOWR_CLUSTER_DONE;
+        }
+    } else if (ac_cl->state == AIOWR_CLUSTER_COWWR) {
+        int64_t i;
+
+        for (i = ac_cl->first_cluster; i < ac_cl->last_cluster; i++) {
+            /* Set this cluster's bit in the in_cow_bitmap */
+            set_cluster_dirty(snap_bd->in_cow_bitmap,
+                                            i, &snap_bd->in_cow_bitmap_count);
+        }
+        ac_cl->state = AIOWR_CLUSTER_DONE;
+    }
+    /* check if all clusters' COW read and write is complete */
+    ac_cl_iter = ac->clusters;
+    while (ac_cl_iter) {
+        if (ac_cl_iter->state != AIOWR_CLUSTER_DONE)
+            goto unlock_and_exit;
+        ac_cl_iter = ac_cl_iter->next;
+    }
+    free_aiowr_interposer_cluster(ac);
+    /* All clusters' COW read and write is complete */
+    bs->drv->bdrv_aio_writev(bs, ac->sector_num, ac->qiov,
+                        ac->nb_sectors, aiowrite_cb_interposer_realwr, ac);
+
+unlock_and_exit:
+    pthread_mutex_unlock(&backup_mutex);
+}
+
+static BlockDriverAIOCB *
+make_aio_cluster(int64_t cur_first_cluster, int64_t cur_last_cluster,
+                livebackup_snap *snap_bd, aiowr_interposer *ac)
+{
+    BlockDriverAIOCB *ret = NULL;
+    aiowr_interposer_cluster *ac_cl = qemu_mallocz(sizeof(*ac_cl));
+
+    ac_cl->first_cluster = cur_first_cluster;
+    ac_cl->last_cluster = cur_last_cluster;
+    ac_cl->cow_tmp_buffer = qemu_memalign(512,
+                    (ac_cl->last_cluster - ac_cl->first_cluster)
+                                * BACKUP_CLUSTER_SIZE);
+    ac_cl->cow_tmp_qiov = qemu_mallocz(sizeof(*ac_cl->cow_tmp_qiov));
+    ac_cl->state = AIOWR_CLUSTER_COWRD;
+    qemu_iovec_init(ac_cl->cow_tmp_qiov, 1);
+    qemu_iovec_add(ac_cl->cow_tmp_qiov, ac_cl->cow_tmp_buffer,
+                    (ac_cl->last_cluster - ac_cl->first_cluster)
+                                * BACKUP_CLUSTER_SIZE);
+    ret = snap_bd->backup_base_bs->drv->bdrv_aio_readv(
+            snap_bd->backup_base_bs,
+            ac_cl->first_cluster * BACKUP_BLOCKS_PER_CLUSTER,
+            ac_cl->cow_tmp_qiov,
+            (ac_cl->last_cluster - ac_cl->first_cluster)
+                * BACKUP_BLOCKS_PER_CLUSTER,
+            aiowrite_cb_interposer_cow, ac_cl);
+    ac_cl->up = ac;
+    ac_cl->next = ac->clusters;
+    ac->clusters = ac_cl;
+    return ret;
+}
+
+/*
+ * Every write to a livebackup drive is intercepted, and
+ * its state is maintained in our list of pending writes
+ * aiowr_interposers. Before starting a snapshot, the
+ * aiowr_interposers list must be empty. We wait upto 40
+ * seconds for this list to empty.
+ * During a snapshot, we create a COW file of all writes
+ * to the base drive before scheduling the write to the
+ * base drive.
+ */
+BlockDriverAIOCB *
+livebackup_interposer(BlockDriverState *bs, int64_t sector_num,
+                                 QEMUIOVector *qiov, int nb_sectors,
+                                 BlockDriverCompletionFunc *cb, void *opaque)
+{
+    aiowr_interposer *ac = NULL;
+    BlockDriverAIOCB *ret = NULL;
+
+    pthread_mutex_lock(&backup_mutex);
+    if (bs->livebackup_disk) {
+        livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
+
+        /* set the blocks as dirty in this livebackup drive's dirty bitmap */
+        set_blocks_dirty(bd->bd_base.dirty_bitmap, sector_num, nb_sectors,
+                                    &bd->bd_base.bdinfo.dirty_clusters);
+
+        ac = calloc(1, sizeof(aiowr_interposer));
+        ac->bs = bs;
+        ac->cb = cb;
+        ac->opaque = opaque;
+        ac->sector_num = sector_num;
+        ac->qiov = qiov;
+        ac->nb_sectors = nb_sectors;
+        ac->next = aiowr_interposers;
+        aiowr_interposers = ac;
+
+        /* if there is no snapshot in progress, then schedule the actual wr */
+        if (!in_progress_snap || in_progress_snap->destroy) {
+            /* COW is not necessary. Initiate the actual write */
+            goto schedule_real_wr;
+        }
+
+        /*
+         * For every cluster that this write specifies, check
+         * if we need to do a COW of the original cluster.
+         */
+        int64_t first_cluster;
+        int64_t last_cluster;
+        int64_t i;
+        int64_t cur_first_cluster;
+        int64_t cur_last_cluster;
+        livebackup_snap *snap_bd = bd->snap_backup_disk;
+
+        first_cluster = sector_num / BACKUP_BLOCKS_PER_CLUSTER;
+        last_cluster = (sector_num+nb_sectors+BACKUP_BLOCKS_PER_CLUSTER-1)
+                            /BACKUP_BLOCKS_PER_CLUSTER;
+
+        i = cur_first_cluster = cur_last_cluster = first_cluster;
+        while (i < last_cluster) {
+            if (is_cluster_dirty(snap_bd->bd_base.dirty_bitmap, i) &&
+                            !is_cluster_dirty(snap_bd->in_cow_bitmap, i)) {
+                i++;
+                cur_last_cluster = i;
+            } else {
+                if (cur_last_cluster > cur_first_cluster) {
+                    ret = make_aio_cluster(cur_first_cluster,
+                                            cur_last_cluster, snap_bd,
+                                            ac);
+                }
+                i++;
+                cur_first_cluster = cur_last_cluster = i;
+            }
+        }
+        if (cur_last_cluster > cur_first_cluster) {
+            ret = make_aio_cluster(cur_first_cluster,
+                                    cur_last_cluster, snap_bd,
+                                    ac);
+        }
+        if (ac->clusters == NULL) {
+             /* No cow necessary. Start real wr */
+            goto schedule_real_wr;
+        } else {
+            goto unlock_and_exit;
+        }
+
+schedule_real_wr:
+        ret = bs->drv->bdrv_aio_writev(bs, sector_num, qiov,
+                                nb_sectors, aiowrite_cb_interposer_realwr, ac);
+        /* Fall through to unlock and exit ... */
+    }
+unlock_and_exit:
+    pthread_mutex_unlock(&backup_mutex);
+    return ret;
+}
+
+/*
+ * you must call this function while
+ * holding the backup_mutex
+ */
+static void
+wait_for_aio_empty(int num_tensecs)
+{
+    if (aiowr_interposers != NULL) {
+        int retries;
+        for (retries = 0; retries < num_tensecs; retries++) {
+            struct timespec tms;
+            clock_gettime(CLOCK_REALTIME, &tms);
+            tms.tv_sec += 10;
+
+            /*
+             * There are outstanding writes. Wait for those to be done
+             * before doing the snapshot.
+             */
+            waiting_for_aio_writes_to_be_done = 1;
+            pthread_cond_timedwait(&backup_cond, &backup_mutex, &tms);
+            waiting_for_aio_writes_to_be_done = 0;
+            if (aiowr_interposers == NULL) {
+                break;
+            }
+        }
     }
 }
 
+void
+livebackup_flush(BlockDriverState *bs)
+{
+    pthread_mutex_lock(&backup_mutex);
+    if (bs->livebackup_disk) {
+        wait_for_aio_empty(6);
+    }
+    pthread_mutex_unlock(&backup_mutex);
+}
+
 static inline void
-copy_cow_blocks(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
+copy_cow_clusters(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
 {
     if (in_progress_snap) {
         livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
         livebackup_snap *snap_bd = bd->snap_backup_disk;
-        int i;
+        int64_t first_cluster;
+        int64_t last_cluster;
+        int64_t i;
 
-        /* Create COW of each block in the backup snapshot's dirty bitmap */
-        for (i = 0; i < nb_sectors; i++) {
-            if (is_block_dirty(snap_bd->bd_base.dirty_bitmap, sector_num + i)) {
+        first_cluster = sector_num / BACKUP_BLOCKS_PER_CLUSTER;
+        last_cluster = (sector_num + nb_sectors + BACKUP_BLOCKS_PER_CLUSTER - 1)
+                        /BACKUP_BLOCKS_PER_CLUSTER;
+
+        /* Create COW of each cluster in the backup snapshot's dirty bitmap */
+        for (i = first_cluster; i < last_cluster; i++) {
+            if (is_cluster_dirty(snap_bd->bd_base.dirty_bitmap, i)) {
                 /* If sector is in dirty map of snap, then do a COW */
-                if (bdrv_read(bs, sector_num + i,
-                                in_progress_snap->backup_tmp_buffer, 1) < 0) {
+                if (bdrv_read(bs, i * BACKUP_BLOCKS_PER_CLUSTER,
+                                in_progress_snap->backup_tmp_buffer,
+                                BACKUP_BLOCKS_PER_CLUSTER) < 0) {
                     fprintf(stderr,
-                            "copy_cow_blocks: Error. read COW of "
-                            "block %ld failed\n",
-                            sector_num + i);
+                            "copy_cow_clusters: Error. read COW of "
+                            "cluster %ld failed\n", i);
                 } else {
                     int rv;
-                    if ((rv = bdrv_write(snap_bd->backup_cow_bs, sector_num + i,
-                             in_progress_snap->backup_tmp_buffer, 1)) < 0) {
+                    if ((rv = bdrv_write(snap_bd->backup_cow_bs,
+                            i * BACKUP_BLOCKS_PER_CLUSTER,
+                            in_progress_snap->backup_tmp_buffer,
+                            BACKUP_BLOCKS_PER_CLUSTER)) < 0) {
                         fprintf(stderr,
-                            "copy_cow_blocks: Error. write COW of "
-                            "block %ld failed %d\n",
-                            sector_num + i, rv);
+                            "copy_cow_clusters: Error. write COW of "
+                            "cluster %ld failed %d\n", i, rv);
                     } else {
-                        /* Set this block's bit in the in_cow_bitmap */
-                        set_block_dirty(snap_bd->in_cow_bitmap,
-                                        sector_num + i,
-                                        &snap_bd->in_cow_bitmap_count);
+                        /* Set this cluster's bit in the in_cow_bitmap */
+                        set_cluster_dirty(snap_bd->in_cow_bitmap,
+                                        i, &snap_bd->in_cow_bitmap_count);
                     }
                 }
             }
@@ -196,83 +453,12 @@ set_dirty(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
     if (bs->livebackup_disk) {
         livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
 
-        set_blocks_dirty(bd->bd_base.dirty_bitmap, sector_num, nb_sectors, &bd->bd_base.bdinfo.dirty_blocks);
-        copy_cow_blocks(bs, sector_num, nb_sectors);
-    }
-
-    pthread_mutex_unlock(&backup_mutex);
-}
-
-static inline int
-is_copy_cow_necessary(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
-{
-    if (in_progress_snap) {
-        livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
-        livebackup_snap *snap_bd = bd->snap_backup_disk;
-        int i;
-
-        for (i = 0; i < nb_sectors; i++) {
-            if (is_block_dirty(snap_bd->bd_base.dirty_bitmap, sector_num + i)) {
-                return 1;
-            }
-        }
-        return 0;
-    } else {
-        return 0;
-    }
-}
-
-BlockDriverAIOCB *
-livebackup_interposer(BlockDriverState *bs, int64_t sector_num,
-                                 QEMUIOVector *qiov, int nb_sectors,
-                                 BlockDriverCompletionFunc *cb, void *opaque)
-{
-    aiowr_interposer *ac = NULL;
-    BlockDriverAIOCB *ret = NULL;
-
-    pthread_mutex_lock(&backup_mutex);
-    if (bs->livebackup_disk) {
-        livebackup_disk *bd = (livebackup_disk *) bs->livebackup_disk;
-
         set_blocks_dirty(bd->bd_base.dirty_bitmap, sector_num, nb_sectors,
-                                    &bd->bd_base.bdinfo.dirty_blocks);
-
-        ac = calloc(1, sizeof(aiowr_interposer));
-        ac->bs = bs;
-        ac->cb = cb;
-        ac->opaque = opaque;
-        ac->sector_num = sector_num;
-        ac->qiov = qiov;
-        ac->nb_sectors = nb_sectors;
-
-        ac->next = aiowr_interposers;
-        aiowr_interposers = ac;
-
-        if (is_copy_cow_necessary(bs, sector_num, nb_sectors)) {
-            /* COW is necessary. Initiate the COW read */
-            livebackup_snap *snap_bd = bd->snap_backup_disk;
-            ac->state = AIOWR_INTERPOSER_COW_READ;
-            ac->cow_tmp_buffer = qemu_memalign(512,
-                            nb_sectors * BACKUP_BLOCK_SIZE);
-            ac->cow_tmp_qiov = qemu_mallocz(sizeof(*qiov));
-            qemu_iovec_init(ac->cow_tmp_qiov, 1);
-            qemu_iovec_add(ac->cow_tmp_qiov, ac->cow_tmp_buffer,
-                            nb_sectors * BACKUP_BLOCK_SIZE);
-
-
-            ret = snap_bd->backup_base_bs->drv->bdrv_aio_readv(
-                    snap_bd->backup_base_bs, sector_num, ac->cow_tmp_qiov,
-                    nb_sectors, aiowrite_cb_interposer, ac);
-        } else {
-            /* COW is not necessary. Initiate the actual write */
-            ac->state = AIOWR_INTERPOSER_ACTUAL_WRITE;
-
-            ret = bs->drv->bdrv_aio_writev(bs, sector_num, qiov,
-                                nb_sectors, aiowrite_cb_interposer, ac);
-        }
+                        &bd->bd_base.bdinfo.dirty_clusters);
+        copy_cow_clusters(bs, sector_num, nb_sectors);
     }
+
     pthread_mutex_unlock(&backup_mutex);
-    return ret;
 }
 
 static int
@@ -447,7 +633,7 @@ static void
 create_hashfilename(const char *vdisk_file, char *hashfn, int hashfnlen)
 {
     unsigned int hv = MurmurHashNeutral2(vdisk_file, strlen(vdisk_file), 0);
-    snprintf(hashfn, hashfnlen, "%.16x", hv);
+    snprintf(hashfn, hashfnlen, "%.8x", (int32_t) hv);
 }
 
 /*
@@ -490,46 +676,43 @@ open_dirty_bitmap(const char *filename)
                 "%s/%s.qcow2", livebackup_dir, hfn);
 
     if (stat(filename, &sta) != 0) {
-        /* filename does not exist? */
+        /* 'filename' does not exist? */
         return NULL;
     }
-    if ((stat(conf_file, &stb) != 0) || (sta.st_mtime > stb.st_mtime)) {
+    if (stat(conf_file, &stb) != 0) {
         /*
-         * conf file does not exist, or
-         * conf file was modified before vdisk file.
+         * conf file does not exist
          * New full backup
          */
-        fprintf(stderr, "open_dirty_bitmap: Conf\n\t%s - %s"
-            " was modified before vdisk\n\t%s - %s."
-            " Hence dirty_bitmap is invalid.",
-             conf_file, ctime(&stb.st_mtime), filename, ctime(&sta.st_mtime));
+        fprintf(stderr, "open_dirty_bitmap: Conf %s does not exist."
+            " dirty_bitmap is invalid.\n", conf_file);
         full_backup_mtime = sta.st_mtime;
         snap = 0;
         dirty_bitmap_valid = 0;
-        write_conf_file(conf_file, full_backup_mtime, snap);
     } else {
         /*
-         * conf file exists, and
-         * conf file was modified after vdisk file.
+         * conf file exists
          * Hence, dirty bitmap is valid.
          * Incremental backup is feasible
          */
-        fprintf(stderr, "open_dirty_bitmap: Conf\n\t%s - %s"
-                        " is newer than vdisk\n\t%s - %s",
-                        conf_file, ctime(&stb.st_mtime),
-                        filename, ctime(&sta.st_mtime));
+        fprintf(stderr, "open_dirty_bitmap: Conf %s exists.\n", conf_file);
         if (parse_conf_file(conf_file, &full_backup_mtime, &snap) == 0) {
-            fprintf(stderr, "open_dirty_bitmap: dirty_bitmap valid. New snap\n");
+            fprintf(stderr,
+                "open_dirty_bitmap: bitmap valid mtime %ld snap %ld\n",
+                full_backup_mtime, snap);
             dirty_bitmap_valid = 1;
         } else {
             fprintf(stderr, "open_dirty_bitmap: Conf file exists,"
                             " but contents invalid. New full backup\n");
-            dirty_bitmap_valid = 0;
-            unlink(dirty_bitmap_file);
             full_backup_mtime = sta.st_mtime;
             snap = 0;
             dirty_bitmap_valid = 0;
-            write_conf_file(conf_file, full_backup_mtime, snap);
+        }
+    }
+    if (unlink(conf_file) != 0) {
+        if (errno != ENOENT) {
+            fprintf(stderr, "open_dirty_bitmap: Error. Unlink %s rv %d\n",
+                conf_file, errno);
         }
     }
 
@@ -551,8 +734,12 @@ open_dirty_bitmap(const char *filename)
                                 sizeof(retv->bd_base.snap_file));
 
     if (S_ISREG((sta.st_mode))) {
-        retv->bd_base.dirty_bitmap_len = ((sta.st_size / 512) + 7)/8;
-        retv->bd_base.bdinfo.max_blocks = sta.st_size/512;
+        retv->bd_base.bdinfo.max_clusters = sta.st_size/BACKUP_CLUSTER_SIZE;
+        retv->bd_base.dirty_bitmap_len = 
+                                    (retv->bd_base.bdinfo.max_clusters + 7)/8;
+        fprintf(stderr, "livebackup: drive file %s is a reg file of "
+                            "size %ld. Bitmap size %d\n", filename,
+                            sta.st_size, retv->bd_base.dirty_bitmap_len);
     } else if (S_ISBLK((sta.st_mode))) {
         unsigned long sz;
         int fd = open(filename, O_LARGEFILE, O_RDONLY);
@@ -563,8 +750,12 @@ open_dirty_bitmap(const char *filename)
             return NULL;
         }
         if (!ioctl(fd, BLKGETSIZE64, &sz)) {
-            retv->bd_base.dirty_bitmap_len = ((sz / 512) + 7)/8;
-            retv->bd_base.bdinfo.max_blocks = sz/512;
+            retv->bd_base.bdinfo.max_clusters = sz/BACKUP_CLUSTER_SIZE;
+            retv->bd_base.dirty_bitmap_len = 
+                                    (retv->bd_base.bdinfo.max_clusters + 7)/8;
+            fprintf(stderr, "livebackup: drive file %s is a block dev of "
+                            "size %ld. Bitmap size %d\n", filename, sz,
+                            retv->bd_base.dirty_bitmap_len);
             close(fd);
         } else {
             fprintf(stderr, "open_dirty_bitmap: error determining size of"
@@ -600,11 +791,17 @@ open_dirty_bitmap(const char *filename)
     if (!dirty_bitmap_valid) {
         memset(retv->bd_base.dirty_bitmap, 0xff,
                                             retv->bd_base.dirty_bitmap_len);
-        retv->bd_base.bdinfo.dirty_blocks = retv->bd_base.bdinfo.max_blocks;
+        retv->bd_base.bdinfo.dirty_clusters = retv->bd_base.bdinfo.max_clusters;
         return retv;
     }
     read_in_dirty_bitmap(dirty_bitmap_file, &retv->bd_base.dirty_bitmap,
                                             retv->bd_base.dirty_bitmap_len);
+    if (unlink(dirty_bitmap_file) != 0) {
+        if (errno != ENOENT) {
+            fprintf(stderr, "open_dirty_bitmap: Error. Unlink %s rv %d\n",
+                    dirty_bitmap_file, errno);
+        }
+    }
     return retv;
 }
 
@@ -628,10 +825,10 @@ close_dirty_bitmap(BlockDriverState *bs)
                 int64_t it;
                 livebackup_snap *snbd =  bd->snap_backup_disk;
 
-                for (it = 0; it < bd->bd_base.bdinfo.max_blocks; it++) {
-                    if (is_block_dirty(snbd->bd_base.dirty_bitmap, it)) {
-                        set_block_dirty(bd->bd_base.dirty_bitmap, it,
-                                        &bd->bd_base.bdinfo.dirty_blocks);
+                for (it = 0; it < bd->bd_base.bdinfo.max_clusters; it++) {
+                    if (is_cluster_dirty(snbd->bd_base.dirty_bitmap, it)) {
+                        set_cluster_dirty(bd->bd_base.dirty_bitmap, it,
+                                        &bd->bd_base.bdinfo.dirty_clusters);
                     }
                 }
                 bd->bd_base.bdinfo.snapnumber--;
@@ -653,6 +850,7 @@ close_dirty_bitmap(BlockDriverState *bs)
                     break;
                 }
             }
+            fsync(dfd);
             close(dfd);
             /*
             fprintf(stderr, "Wrote a dirty_bitmap %s of len %d\n",
@@ -664,7 +862,9 @@ close_dirty_bitmap(BlockDriverState *bs)
                     errno, bd->bd_base.dirty_bitmap_file);
         }
 
-        write_conf_file(bd->bd_base.conf_file, bd->bd_base.bdinfo.full_backup_mtime, bd->bd_base.bdinfo.snapnumber);
+        write_conf_file(bd->bd_base.conf_file,
+                        bd->bd_base.bdinfo.full_backup_mtime,
+                        bd->bd_base.bdinfo.snapnumber);
 
         remove_from_backup_disk_list(bd);
         qemu_free(bd->bd_base.dirty_bitmap);
@@ -776,25 +976,7 @@ backup_do_snap(int fd, backup_request *req)
     }
 
     /* Wait for upto 4 * 10 seconds if there are pending writes */
-    if (aiowr_interposers != NULL) {
-        int retries;
-        for (retries = 0; retries < 4; retries++) {
-            struct timespec tms;
-            clock_gettime(CLOCK_REALTIME, &tms);
-            tms.tv_sec += 10;
-
-            /*
-             * There are outstanding writes. Wait for those to be done
-             * before doing the snapshot.
-             */
-            waiting_for_aio_writes_to_be_done = 1;
-            pthread_cond_timedwait(&backup_cond, &backup_mutex, &tms);
-            waiting_for_aio_writes_to_be_done = 0;
-            if (aiowr_interposers == NULL) {
-                break;
-            }
-        }
-    }
+    wait_for_aio_empty(4);
     if (aiowr_interposers != NULL) {
         res.status = B_DO_SNAP_RES_PENDING_WRITES;
         goto write_result_and_exit;
@@ -806,7 +988,7 @@ backup_do_snap(int fd, backup_request *req)
         goto write_result_and_exit;
     }
     in_progress_snap->backup_tmp_buffer = qemu_memalign(512,
-                BACKUP_MAX_BLOCKS_IN_1_RESP * BACKUP_BLOCK_SIZE);
+                BACKUP_MAX_CLUSTERS_IN_1_RESP * BACKUP_CLUSTER_SIZE);
     if (in_progress_snap->backup_tmp_buffer == NULL) {
         res.status = B_DO_SNAP_RES_NOMEM;
         goto write_result_and_exit;
@@ -850,7 +1032,7 @@ backup_do_snap(int fd, backup_request *req)
             itr->bd_base.bdinfo.snapnumber = 0;
             memset(itr->bd_base.dirty_bitmap, 0xff,
                     itr->bd_base.dirty_bitmap_len);
-            itr->bd_base.bdinfo.dirty_blocks = itr->bd_base.bdinfo.max_blocks;
+            itr->bd_base.bdinfo.dirty_clusters = itr->bd_base.bdinfo.max_clusters;
         }
 
         new_bd = create_backup_disk_for_snap(itr);
@@ -865,11 +1047,8 @@ backup_do_snap(int fd, backup_request *req)
         }
 
         itr->bd_base.dirty_bitmap = new_dirty_bitmap;
-        itr->bd_base.bdinfo.dirty_blocks = 0;
+        itr->bd_base.bdinfo.dirty_clusters = 0;
         itr->bd_base.bdinfo.snapnumber++;
-        write_conf_file(itr->bd_base.conf_file,
-                    itr->bd_base.bdinfo.full_backup_mtime,
-                    itr->bd_base.bdinfo.snapnumber);
 
         new_bd->in_cow_bitmap = in_cow_bitmap;
         new_bd->in_cow_bitmap_count = 0;
@@ -895,7 +1074,7 @@ backup_do_snap(int fd, backup_request *req)
             options = parse_option_parameters("",
                     in_progress_snap->backup_snap_drv->create_options, NULL);
             set_option_parameter_int(options, BLOCK_OPT_SIZE,
-                    itr->bd_base.bdinfo.max_blocks);
+                    itr->bd_base.bdinfo.max_clusters);
             if (bdrv_create(in_progress_snap->backup_snap_drv,
                         itr->bd_base.snap_file, options)) {
                 fprintf(stderr,
@@ -927,7 +1106,7 @@ backup_do_snap(int fd, backup_request *req)
                 snprintf(snapname, sizeof(snapname), "%s_backup",
                          new_bd->bd_base.bdinfo.name);
             }
-            snprintf(cmd, sizeof(cmd), "/sbin/lvcreate -L1G -s -n %s %s",
+            snprintf(cmd, sizeof(cmd), "/sbin/lvcreate -L8G -s -n %s %s",
                         snapname, new_bd->bd_base.bdinfo.name);
             rv = system(cmd);
             if (rv != 0) {
@@ -968,9 +1147,9 @@ get_backup_disk(snapshot *snapsh, int disk_number)
 }
 
 static int
-backup_get_blocks(int fd, backup_request *req)
+backup_get_clusters(int fd, backup_request *req)
 {
-    get_blocks_result res;
+    get_clusters_result res;
     livebackup_snap *bd;
     int64_t off = 0;
     int num = 0;
@@ -979,18 +1158,18 @@ backup_get_blocks(int fd, backup_request *req)
 
     pthread_mutex_lock(&backup_mutex);
     if (in_progress_snap == NULL) {
-        res.status = B_GET_BLOCKS_ERROR_NO_SNAP_AVAIL;
+        res.status = B_GET_CLUSTERS_ERROR_NO_SNAP_AVAIL;
         goto write_result_and_exit;
     }
     bd = get_backup_disk(in_progress_snap, req->param1);
     if (bd == NULL) {
-        res.status = B_GET_BLOCKS_ERROR_INVALID_DISK;
+        res.status = B_GET_CLUSTERS_ERROR_INVALID_DISK;
         goto write_result_and_exit;
     }
-    if (get_next_dirty_block_offset(bd->bd_base.dirty_bitmap,
-                bd->bd_base.bdinfo.max_blocks,
-                req->param2, BACKUP_MAX_BLOCKS_IN_1_RESP, &off, &num) < 0) {
-        res.status = B_GET_BLOCKS_NO_MORE_BLOCKS;
+    if (get_next_dirty_cluster_offset(bd->bd_base.dirty_bitmap,
+                bd->bd_base.bdinfo.max_clusters,
+                req->param2, BACKUP_MAX_CLUSTERS_IN_1_RESP, &off, &num) < 0) {
+        res.status = B_GET_CLUSTERS_NO_MORE_CLUSTERS;
         goto write_result_and_exit;
     }
     /*
@@ -998,45 +1177,49 @@ backup_get_blocks(int fd, backup_request *req)
      * or from the base file
      */
     for (bitr = 0; bitr < num; bitr++) {
-        if (is_block_dirty(bd->in_cow_bitmap, off + bitr)) {
-            if (bdrv_read(bd->backup_cow_bs, off + bitr,
-                          in_progress_snap->backup_tmp_buffer
-                          + (bitr * BACKUP_BLOCK_SIZE), 1) != 0) {
+        if (is_cluster_dirty(bd->in_cow_bitmap, off + bitr)) {
+            if (bdrv_read(bd->backup_cow_bs,
+                        (off + bitr) * BACKUP_BLOCKS_PER_CLUSTER,
+                        in_progress_snap->backup_tmp_buffer
+                            + (bitr * BACKUP_CLUSTER_SIZE),
+                        BACKUP_BLOCKS_PER_CLUSTER) != 0) {
                 fprintf(stderr,
-                    "backup_get_blocks: Error reading COW offset %ld\n",
+                    "backup_get_clusters: Error reading COW offset %ld\n",
                         off + bitr);
-                res.status = B_GET_BLOCKS_ERROR_IOREAD;
+                res.status = B_GET_CLUSTERS_ERROR_IOREAD;
                 goto write_result_and_exit;
             }
         } else {
-            if (bdrv_read(bd->backup_base_bs, off + bitr,
-                          in_progress_snap->backup_tmp_buffer
-                          + (bitr * BACKUP_BLOCK_SIZE), 1) != 0) {
+            if (bdrv_read(bd->backup_base_bs,
+                        (off + bitr) * BACKUP_BLOCKS_PER_CLUSTER,
+                        in_progress_snap->backup_tmp_buffer
+                            + (bitr * BACKUP_CLUSTER_SIZE),
+                        BACKUP_BLOCKS_PER_CLUSTER) != 0) {
                 fprintf(stderr,
-                        "backup_get_blocks: Error reading base offset %ld\n",
+                        "backup_get_clusters: Error reading base offset %ld\n",
                         off + bitr);
-                res.status = B_GET_BLOCKS_ERROR_IOREAD;
+                res.status = B_GET_CLUSTERS_ERROR_IOREAD;
                 goto write_result_and_exit;
             }
         }
     }
-    res.status = B_GET_BLOCKS_SUCCESS;
+    res.status = B_GET_CLUSTERS_SUCCESS;
     res.offset = off;
-    res.blocks = (int64_t) num;
+    res.clusters = (int64_t) num;
     write_data = 1;
 
 write_result_and_exit:
     pthread_mutex_unlock(&backup_mutex);
     if (write_bytes(fd, (unsigned char *) &res, sizeof(res)) != sizeof(res)) {
-        fprintf(stderr, "backup_get_blocks: Error %d writing res %ld\n",
+        fprintf(stderr, "backup_get_clusters: Error %d writing res %ld\n",
                errno, res.status);
         return -1;
     } else {
         if (write_data) {
             if (write_bytes(fd, in_progress_snap->backup_tmp_buffer,
-                        num * BACKUP_BLOCK_SIZE) != num * BACKUP_BLOCK_SIZE) {
+                    num * BACKUP_CLUSTER_SIZE) != num * BACKUP_CLUSTER_SIZE) {
                 fprintf(stderr,
-                    "backup_get_blocks: Error %d writing res data\n", errno);
+                    "backup_get_clusters: Error %d writing res data\n", errno);
                 return -1;
             }
         }
@@ -1048,45 +1231,13 @@ static int
 backup_destroy_snap(int fd, backup_request *req)
 {
     destroy_snap_result res;
-    livebackup_snap *itr;
-    livebackup_disk *bitr;
-
     pthread_mutex_lock(&backup_mutex);
-
     if (!in_progress_snap) {
         res.status = B_DESTROY_SNAP_ERROR_NO_SNAP;
-        goto write_result_and_exit;
+    } else {
+        in_progress_snap->destroy = 1;
+        res.status = B_DESTROY_SNAP_SUCCESS;
     }
-
-    qemu_free(in_progress_snap->backup_tmp_buffer);
-
-    /* walk the list of backup_disks in this snapshot and clean them out */
-    itr = in_progress_snap->backup_disks;
-    while (itr != NULL) {
-        livebackup_snap *save;
-        qemu_free(itr->bd_base.dirty_bitmap);
-        qemu_free(itr->in_cow_bitmap);
-        if (itr->backup_base_bs) bdrv_close(itr->backup_base_bs);
-        if (itr->backup_cow_bs) bdrv_close(itr->backup_cow_bs);
-        unlink(itr->bd_base.snap_file);
-        save = itr;
-        itr = itr->next;
-        qemu_free(save);
-    }
-
-    /* in the list of this VM's backup_disks, NULL out the ptr to the snap */
-    bitr = backup_disks;
-    while (bitr != NULL) {
-        bitr->snap_backup_disk = NULL;
-        bitr = bitr->next;
-    }
-
-    qemu_free(in_progress_snap);
-    in_progress_snap = NULL;
-
-    res.status = B_DESTROY_SNAP_SUCCESS;
-
-write_result_and_exit:
     pthread_mutex_unlock(&backup_mutex);
     if (write_bytes(fd, (unsigned char *) &res, sizeof(res)) != sizeof(res)) {
         fprintf(stderr, "backup_destroy_snap: Error %d writing res %ld\n",
@@ -1117,13 +1268,13 @@ do_backup(int fd)
                     return -1;
                 }
                 break;
-            case B_GET_BLOCKS:
-                if (backup_get_blocks(fd, &req) < 0) {
+            case B_DESTROY_SNAP:
+                if (backup_destroy_snap(fd, &req) < 0) {
                     return -1;
                 }
                 break;
-            case B_DESTROY_SNAP:
-                if (backup_destroy_snap(fd, &req) < 0) {
+            case B_GET_CLUSTERS:
+                if (backup_get_clusters(fd, &req) < 0) {
                     return -1;
                 }
                 break;

@@ -33,8 +33,8 @@ static int do_snap(int fd, int full, int64_t *snapres);
 static int process_one_disk(int fd, char *dirname, int disk,
         backup_disk_info *bd);
 static int
-get_blocks(int fd, int disk, int64_t curblock,
-        int64_t *ret_status, int64_t *ret_off, int64_t *ret_blocks,
+get_clusters(int fd, int disk, int64_t curcluster,
+        int64_t *ret_status, int64_t *ret_off, int64_t *ret_clusters,
         unsigned char *ret_data);
 static int destroy_snap(int fd, int64_t *snapres);
 static int is_incremental_possible_1_vdisk(char *local_vm_dir,
@@ -43,7 +43,7 @@ static int delete_all_files(char *dir);
 static int move_all_files(char *dst, char *src);
 static int touch_all_conf_files(char *d, int num_disks, backup_disk_info *bd);
 
-static unsigned char rbuf[BACKUP_MAX_BLOCKS_IN_1_RESP * BACKUP_BLOCK_SIZE];
+static unsigned char rbuf[BACKUP_MAX_CLUSTERS_IN_1_RESP * BACKUP_CLUSTER_SIZE];
 
 int
 main(int argc, char **argv)
@@ -292,20 +292,13 @@ is_incremental_possible_1_vdisk(char *local_vm_dir, backup_disk_info *bd)
     }
     if (stat(conf_file, &stconf) == 0) {
         if (stat(vdisk_file, &stv) == 0) {
-#ifdef CONFIG_LINUX
-            if ((stconf.st_mtime > stv.st_mtime) ||
-		((stconf.st_mtime == stv.st_mtime) && (stconf.st_mtim.tv_nsec > stv.st_mtim.tv_nsec))) {
-#else
-            if (stconf.st_mtime >= stv.st_mtime) {
-#endif
-                /* conf file was modified later than vdisk file */
-                int64_t full_backup_mtime;
-                int64_t snap;
-                if (!parse_conf_file(conf_file, &full_backup_mtime, &snap)) {
-                    if (full_backup_mtime == bd->full_backup_mtime
-                            && (snap+1) == bd->snapnumber) {
-                        return 1;
-                    }
+            int64_t full_backup_mtime;
+            int64_t snap;
+
+            if (!parse_conf_file(conf_file, &full_backup_mtime, &snap)) {
+                if (full_backup_mtime == bd->full_backup_mtime
+                        && (snap+1) == bd->snapnumber) {
+                    return 1;
                 }
             }
         }
@@ -356,7 +349,7 @@ do_snap(int fd, int full, int64_t *snapres)
  * returns:
  * -1: error
  *  0: success
- * Read blocks from the remote qemu-kvm, and then:
+ * Read clusters from the remote qemu-kvm, and then:
  */
 static int
 process_one_disk(int fd, char *dirname, int disk, backup_disk_info *bd)
@@ -365,7 +358,7 @@ process_one_disk(int fd, char *dirname, int disk, backup_disk_info *bd)
     char conf_file[PATH_MAX];
     char vdisk_file[PATH_MAX];
     int vdisk_fd;
-    int64_t off, new_off, status, blocks;
+    int64_t off, new_off, status, clusters;
 
     last = strrchr(bd->name, '/');
     if (last == NULL) {
@@ -383,32 +376,32 @@ process_one_disk(int fd, char *dirname, int disk, backup_disk_info *bd)
     }
 
     off = 0;
-    while (off < bd->max_blocks) {
-        if (get_blocks(fd, disk, off, &status, &new_off, &blocks, rbuf)
+    while (off < bd->max_clusters) {
+        if (get_clusters(fd, disk, off, &status, &new_off, &clusters, rbuf)
                                 < 0) {
-            fprintf(stderr, "Error: Disk %d(%s) get_blocks(off=%ld)\n",
+            fprintf(stderr, "Error: Disk %d(%s) get_clusters(off=%ld)\n",
                 disk, bd->name, off);
             return -1;
         } else {
-            if (status == B_GET_BLOCKS_SUCCESS) {
+            if (status == B_GET_CLUSTERS_SUCCESS) {
                 if (0) {
                     int i;
-                    for (i = 0; i < blocks; i++)
+                    for (i = 0; i < clusters; i++)
                         fprintf(stderr, "%ld\n",
                             new_off + i);
                 }
                 if (vdisk_fd >= 0) {
                     int bwr = pwrite(vdisk_fd,
                                 rbuf,
-                                blocks * 512,
-                                new_off * 512);
-                    if (bwr != (blocks * 512)) {
-                        fprintf(stderr, "Error %d write of cur base",
+                                clusters * BACKUP_CLUSTER_SIZE,
+                                new_off * BACKUP_CLUSTER_SIZE);
+                    if (bwr != (clusters * BACKUP_CLUSTER_SIZE)) {
+                        fprintf(stderr, "Error %d write of backup image\n",
                                 errno);
                         return -1;
                     }
                 }
-                off = new_off + blocks;
+                off = new_off + clusters;
                 if (0) {
                     struct timespec tms;
                     tms.tv_sec = 0;
@@ -416,11 +409,11 @@ process_one_disk(int fd, char *dirname, int disk, backup_disk_info *bd)
                     nanosleep(&tms, NULL);
                 }
                 continue;
-            } else if (status == B_GET_BLOCKS_NO_MORE_BLOCKS) {
+            } else if (status == B_GET_CLUSTERS_NO_MORE_CLUSTERS) {
                 break;
             } else {
                 fprintf(stderr, "Error: Disk %d(%s) "
-                    "get_blocks(off=%ld).status=%ld\n",
+                    "get_clusters(off=%ld).status=%ld\n",
                     disk, bd->name, off, status);
                 return -1;
             }
@@ -432,40 +425,40 @@ process_one_disk(int fd, char *dirname, int disk, backup_disk_info *bd)
 }
 
 static int
-get_blocks(int fd, int disk, int64_t curblock,
-        int64_t *ret_status, int64_t *ret_off, int64_t *ret_blocks,
+get_clusters(int fd, int disk, int64_t curcluster,
+        int64_t *ret_status, int64_t *ret_off, int64_t *ret_clusters,
         unsigned char *ret_data)
 {
     backup_request        req;
-    get_blocks_result    resp;
+    get_clusters_result   resp;
 
-    req.opcode = B_GET_BLOCKS;
+    req.opcode = B_GET_CLUSTERS;
     req.param1 = (int64_t) disk;
-    req.param2 = curblock;
+    req.param2 = curcluster;
 
     if (write_bytes(fd, (unsigned char *) &req, sizeof(req)) 
                             != sizeof(req)) {
-        fprintf(stderr, "error %d writing get_blocks req\n", errno);
+        fprintf(stderr, "error %d writing get_clusters req\n", errno);
         return -1;
     }
     if (read_bytes(fd, (unsigned char *) &resp, sizeof(resp)) 
                             != sizeof(resp)) {
-        fprintf(stderr, "error %d reading get_blocks res\n", errno);
+        fprintf(stderr, "error %d reading get_clusters res\n", errno);
         return -1;
     }
     *ret_status = resp.status;
-    if (resp.status == B_GET_BLOCKS_SUCCESS) {
-        if (read_bytes(fd, ret_data, resp.blocks * BACKUP_BLOCK_SIZE) 
-                    != (resp.blocks * BACKUP_BLOCK_SIZE)) {
-            fprintf(stderr, "error %d reading get_blocks data\n",
+    if (resp.status == B_GET_CLUSTERS_SUCCESS) {
+        if (read_bytes(fd, ret_data, resp.clusters * BACKUP_CLUSTER_SIZE) 
+                    != (resp.clusters * BACKUP_CLUSTER_SIZE)) {
+            fprintf(stderr, "error %d reading get_clusters data\n",
                 errno);
             return -1;
         }
         *ret_off = resp.offset;
-        *ret_blocks = resp.blocks;
+        *ret_clusters = resp.clusters;
     } else {
         *ret_off = 0;
-        *ret_blocks = 0;
+        *ret_clusters = 0;
     }
     return 0;
 }
