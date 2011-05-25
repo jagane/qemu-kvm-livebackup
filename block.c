@@ -466,9 +466,6 @@ static int bdrv_open_common(BlockDriverState *bs, const char *filename,
 
     /* Open the image, either directly or using a protocol */
     if (drv->bdrv_file_open) {
-        if (flags & BDRV_O_RDWR && flags & BDRV_O_LIVEBACKUP) {
-            bs->livebackup_disk = open_dirty_bitmap(filename);
-        }
         ret = drv->bdrv_file_open(bs, filename, open_flags);
     } else {
         ret = bdrv_file_open(&bs->file, filename, open_flags);
@@ -493,12 +490,13 @@ static int bdrv_open_common(BlockDriverState *bs, const char *filename,
         unlink(filename);
     }
 #endif
+    if (drv->bdrv_file_open && (flags & BDRV_O_RDWR) 
+                            && (flags & BDRV_O_LIVEBACKUP)) {
+        bs->livebackup_disk = livebackup_init(filename, bs->total_sectors);
+    }
     return 0;
 
 free_and_fail:
-    if (bs->livebackup_disk != NULL) {
-        close_dirty_bitmap(bs);
-    }
     if (bs->file) {
         bdrv_delete(bs->file);
         bs->file = NULL;
@@ -691,7 +689,7 @@ void bdrv_close(BlockDriverState *bs)
         }
 
         if (bs->livebackup_disk) {
-            close_dirty_bitmap(bs);
+            deinit_livebackup(bs);
         }
 
         /* call the change callback */

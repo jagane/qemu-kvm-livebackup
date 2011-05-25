@@ -636,23 +636,8 @@ create_hashfilename(const char *vdisk_file, char *hashfn, int hashfnlen)
     snprintf(hashfn, hashfnlen, "%.8x", (int32_t) hv);
 }
 
-/*
- * If the virtual disk file filename has a config file called
- * filename.livebackupconf present in the same directory, then this
- * virtual disk is part of the livebackup set.
- *
- * Next, if the config file was modified after the virtual disk file
- * then the persistent dirty blocks bitmap file is considered valid,
- * and an incremental backup is possible.
- *
- * If the config file was modified before the virtual disk file was
- * modified, then the VM probably crashed without allowing the
- * livebackup code to write out the dirty blocks bitmap and the
- * conf file correctly and exit cleanly. Hence the backup must become
- * a full backup.
- */
 livebackup_disk *
-open_dirty_bitmap(const char *filename)
+livebackup_init(const char *filename, int64_t total_sectors)
 {
     char dirty_bitmap_file[PATH_MAX];
     char hfn[16];
@@ -664,8 +649,10 @@ open_dirty_bitmap(const char *filename)
     int dirty_bitmap_valid = 0;
     livebackup_disk *retv;
 
-    if (!livebackup_dir) {
+fprintf(stderr, "livebackup_init: Entered. fn %s, ts %ld\n", filename, total_sectors);
+    if (!livebackup_dir || total_sectors <= 0) {
         /* We need a livebackup_dir to store snap and COW files */
+        /* Also, we need to know the length of the virtual drive */
         return NULL;
     }
     create_hashfilename(filename, hfn, sizeof(hfn));
@@ -684,7 +671,7 @@ open_dirty_bitmap(const char *filename)
          * conf file does not exist
          * New full backup
          */
-        fprintf(stderr, "open_dirty_bitmap: Conf %s does not exist."
+        fprintf(stderr, "livebackup_init: Conf %s does not exist."
             " dirty_bitmap is invalid.\n", conf_file);
         full_backup_mtime = sta.st_mtime;
         snap = 0;
@@ -695,14 +682,14 @@ open_dirty_bitmap(const char *filename)
          * Hence, dirty bitmap is valid.
          * Incremental backup is feasible
          */
-        fprintf(stderr, "open_dirty_bitmap: Conf %s exists.\n", conf_file);
+        fprintf(stderr, "livebackup_init: Conf %s exists.\n", conf_file);
         if (parse_conf_file(conf_file, &full_backup_mtime, &snap) == 0) {
             fprintf(stderr,
-                "open_dirty_bitmap: bitmap valid mtime %ld snap %ld\n",
+                "livebackup_init: bitmap valid mtime %ld snap %ld\n",
                 full_backup_mtime, snap);
             dirty_bitmap_valid = 1;
         } else {
-            fprintf(stderr, "open_dirty_bitmap: Conf file exists,"
+            fprintf(stderr, "livebackup_init: Conf file exists,"
                             " but contents invalid. New full backup\n");
             full_backup_mtime = sta.st_mtime;
             snap = 0;
@@ -711,7 +698,7 @@ open_dirty_bitmap(const char *filename)
     }
     if (unlink(conf_file) != 0) {
         if (errno != ENOENT) {
-            fprintf(stderr, "open_dirty_bitmap: Error. Unlink %s rv %d\n",
+            fprintf(stderr, "livebackup_init: Error. Unlink %s rv %d\n",
                 conf_file, errno);
         }
     }
@@ -719,7 +706,7 @@ open_dirty_bitmap(const char *filename)
     retv = qemu_mallocz(sizeof(livebackup_disk));
     if (!retv) {
         fprintf(stderr,
-                "open_dirty_bitmap: error allocating livebackup_disk for %s\n",
+                "livebackup_init: error allocating livebackup_disk for %s\n",
                 filename);
         return NULL;
     }
@@ -733,49 +720,14 @@ open_dirty_bitmap(const char *filename)
     strncpy(retv->bd_base.snap_file, snap_file,
                                 sizeof(retv->bd_base.snap_file));
 
-    if (S_ISREG((sta.st_mode))) {
-        retv->bd_base.bdinfo.max_clusters = sta.st_size/BACKUP_CLUSTER_SIZE;
-        retv->bd_base.dirty_bitmap_len = 
-                                    (retv->bd_base.bdinfo.max_clusters + 7)/8;
-        fprintf(stderr, "livebackup: drive file %s is a reg file of "
-                            "size %ld. Bitmap size %d\n", filename,
-                            sta.st_size, retv->bd_base.dirty_bitmap_len);
-    } else if (S_ISBLK((sta.st_mode))) {
-        unsigned long sz;
-        int fd = open(filename, O_LARGEFILE, O_RDONLY);
-        if (fd < 0) {
-            fprintf(stderr, "open_dirty_bitmap: error opening block device %s"
-                             " to determine size\n", filename);
-            qemu_free(retv);
-            return NULL;
-        }
-        if (!ioctl(fd, BLKGETSIZE64, &sz)) {
-            retv->bd_base.bdinfo.max_clusters = sz/BACKUP_CLUSTER_SIZE;
-            retv->bd_base.dirty_bitmap_len = 
-                                    (retv->bd_base.bdinfo.max_clusters + 7)/8;
-            fprintf(stderr, "livebackup: drive file %s is a block dev of "
-                            "size %ld. Bitmap size %d\n", filename, sz,
-                            retv->bd_base.dirty_bitmap_len);
-            close(fd);
-        } else {
-            fprintf(stderr, "open_dirty_bitmap: error determining size of"
-                             " block device %s\n", filename);
-            qemu_free(retv);
-            close(fd);
-            return NULL;
-        }
-    } else {
-        fprintf(stderr, "open_dirty_bitmap: error. %s is neither a "
-                        "regular file, nor a block device\n", filename);
-        qemu_free(retv);
-        return NULL;
-    }
+    retv->bd_base.bdinfo.max_clusters = total_sectors/BACKUP_BLOCKS_PER_CLUSTER;
+    retv->bd_base.dirty_bitmap_len = (retv->bd_base.bdinfo.max_clusters + 7)/8;
     retv->next = NULL;
 
     retv->bd_base.dirty_bitmap = qemu_mallocz(retv->bd_base.dirty_bitmap_len);
     if (retv->bd_base.dirty_bitmap == NULL) {
         fprintf(stderr,
-               "open_dirty_bitmap: error allocating dirty_bitmap for %s\n",
+               "livebackup_init: error allocating dirty_bitmap for %s\n",
                filename);
         qemu_free(retv);
         return NULL;
@@ -798,7 +750,7 @@ open_dirty_bitmap(const char *filename)
                                             retv->bd_base.dirty_bitmap_len);
     if (unlink(dirty_bitmap_file) != 0) {
         if (errno != ENOENT) {
-            fprintf(stderr, "open_dirty_bitmap: Error. Unlink %s rv %d\n",
+            fprintf(stderr, "livebackup_init: Error. Unlink %s rv %d\n",
                     dirty_bitmap_file, errno);
         }
     }
@@ -806,7 +758,7 @@ open_dirty_bitmap(const char *filename)
 }
 
 void
-close_dirty_bitmap(BlockDriverState *bs)
+deinit_livebackup(BlockDriverState *bs)
 {
     int dfd;
     livebackup_disk *bd;

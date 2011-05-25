@@ -338,8 +338,8 @@ typedef struct _aiowr_interposer {
     struct _aiowr_interposer *next;
 } aiowr_interposer;
 
-livebackup_disk *open_dirty_bitmap(const char *filename);
-void close_dirty_bitmap(BlockDriverState *bs);
+livebackup_disk * livebackup_init(const char *filename, int64_t total_sectors);
+void deinit_livebackup(BlockDriverState *bs);
 void set_dirty(BlockDriverState *bs, int64_t sector_num,
                                  int nb_sectors);
 BlockDriverAIOCB *livebackup_interposer(BlockDriverState *bs,
